@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 from datetime import date, datetime
+from inspect import signature
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -470,8 +471,8 @@ def _parse_bucket_and_prefix_from_env() -> tuple[str, str]:
 @task(
     cache=False,
     retries=1,
-    requests=Resources(cpu="1", mem="1Gi"),
-    limits=Resources(cpu="1.5", mem="2Gi"),
+    requests=Resources(cpu="2", mem="3Gi"),
+    limits=Resources(cpu="3", mem="3Gi"),
 )
 def train_model_task(
     train_num_threads: int,
@@ -654,16 +655,34 @@ def train_model_task(
     with log_step("build_artifact_plan"):
         lineage = table_snapshot_lineage(table)
         bucket, prefix = _parse_bucket_and_prefix_from_env()
-        artifact_plan = build_artifact_plan(
-            model_artifacts_s3_bucket=bucket,
-            model_artifacts_s3_prefix=prefix,
-            feature_version=EXPECTED_FEATURE_VERSION,
-            lineage=lineage,
-            train_eval_cutoff=splits.train_eval_cutoff,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION,
-        )
-        logger.info("artifact_root=%s", artifact_plan.artifact_root_s3_uri)
+
+        # Candidate kwargs for different shared_utils versions
+        candidate_kwargs = {
+            "model_artifacts_s3_bucket": bucket,
+            "model_artifacts_s3_prefix": prefix,
+            "model_artifacts_s3_uri": f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}",
+            "bucket": bucket,
+            "prefix": prefix,
+            "feature_version": EXPECTED_FEATURE_VERSION,
+            "lineage": lineage,
+            "train_eval_cutoff": splits.train_eval_cutoff,
+            "train_eval_cutoff_date": splits.train_eval_cutoff,
+            "model_name": MODEL_NAME,
+            "model_version": MODEL_VERSION,
+        }
+
+        sig = signature(build_artifact_plan)
+        accepted = set(sig.parameters.keys())
+        call_kwargs = {k: v for k, v in candidate_kwargs.items() if k in accepted}
+
+        if not call_kwargs:
+            raise RuntimeError(
+                "build_artifact_plan signature does not accept any of the expected parameters; "
+                "inspect shared_utils.build_artifact_plan to adapt the caller."
+            )
+
+        artifact_plan = build_artifact_plan(**call_kwargs)
+        logger.info("artifact_root=%s", getattr(artifact_plan, "artifact_root_s3_uri", repr(artifact_plan)))
 
     category_levels = build_category_levels(train_eval_df)
 
@@ -672,9 +691,7 @@ def train_model_task(
 
         with log_step("export_onnx_model"):
             onnx_model = export_onnx_model(final_model, feature_order=list(MATRIX_FEATURE_COLUMNS))
-            _onnx_output_names(onnx_model)
 
-        # Build canonical bundle contract and metadata
         with log_step("build_bundle_contract_and_metadata"):
             bundle_contract_json = build_bundle_contract(
                 output_names=[PREDICTION_COLUMN],
@@ -711,38 +728,50 @@ def train_model_task(
                 test_rows=len(test_df),
             )
 
-        # Build TrainingResult with the full set of fields expected by shared_utils.TrainingResult
         with log_step("build_training_result"):
-            training_result = build_training_result(
-                table_identifier="gold.trip_training_matrix",
-                schema_version=EXPECTED_SCHEMA_VERSION,
-                feature_version=EXPECTED_FEATURE_VERSION,
-                preprocessing_version=PREPROCESSING_VERSION,
-                elt_contract=elt_contract,
-                lineage=lineage,
-                category_levels=category_levels,
-                selected_candidate=best_candidate,
-                candidate_reports=candidate_reports,
-                search_best_metrics=search_best_metrics,
-                inner_metrics=inner_metrics,
-                holdout_metrics=holdout_metrics,
-                holdout_baseline_metrics=holdout_baseline_metrics,
-                label_cap_seconds=label_cap_seconds,
-                train_label_p50_seconds=train_label_p50_seconds,
-                best_iteration_inner=best_iteration_inner,
-                final_num_boost_round=final_num_boost_round,
-                train_rows=len(train_eval_df),
-                test_rows=len(test_df),
-                request_feature_columns=list(MATRIX_FEATURE_COLUMNS),
-                engineered_feature_columns=list(MATRIX_FEATURE_COLUMNS),
-                model_input_columns=list(MATRIX_FEATURE_COLUMNS),
-                model_feature_columns=list(MATRIX_FEATURE_COLUMNS),
-                model_name=MODEL_NAME,
-                model_version=MODEL_VERSION,
-                bundle_contract=bundle_contract_json,
-                bundle_metadata=bundle_metadata_json,
-                artifact_plan=artifact_plan,
-            )
+            # Build kwargs for build_training_result and filter by signature to avoid unexpected-arg errors
+            desired_kwargs = {
+                "table_identifier": "gold.trip_training_matrix",
+                "schema_version": EXPECTED_SCHEMA_VERSION,
+                "feature_version": EXPECTED_FEATURE_VERSION,
+                "preprocessing_version": PREPROCESSING_VERSION,
+                "elt_contract": elt_contract,
+                "lineage": lineage,
+                "category_levels": category_levels,
+                "selected_candidate": best_candidate,
+                "candidate_reports": candidate_reports,
+                "search_best_metrics": search_best_metrics,
+                "inner_metrics": inner_metrics,
+                "holdout_metrics": holdout_metrics,
+                "holdout_baseline_metrics": holdout_baseline_metrics,
+                "label_cap_seconds": label_cap_seconds,
+                "train_label_p50_seconds": train_label_p50_seconds,
+                "best_iteration_inner": best_iteration_inner,
+                "final_num_boost_round": final_num_boost_round,
+                "train_rows": len(train_eval_df),
+                "test_rows": len(test_df),
+                "request_feature_columns": list(MATRIX_FEATURE_COLUMNS),
+                "engineered_feature_columns": list(MATRIX_FEATURE_COLUMNS),
+                "model_input_columns": list(MATRIX_FEATURE_COLUMNS),
+                "model_feature_columns": list(MATRIX_FEATURE_COLUMNS),
+                "model_name": MODEL_NAME,
+                "model_version": MODEL_VERSION,
+                "bundle_contract": bundle_contract_json,
+                "bundle_metadata": bundle_metadata_json,
+                "artifact_plan": artifact_plan,
+            }
+
+            tr_sig = signature(build_training_result)
+            tr_accepted = set(tr_sig.parameters.keys())
+            tr_call_kwargs = {k: v for k, v in desired_kwargs.items() if k in tr_accepted}
+
+            if not tr_call_kwargs:
+                raise RuntimeError(
+                    "build_training_result signature does not accept any of the expected parameters; "
+                    "inspect shared_utils.build_training_result to adapt the caller."
+                )
+
+            training_result = build_training_result(**tr_call_kwargs)
 
         with log_step("materialize_training_bundle"):
             model_path, schema_path, metadata_path, manifest_path = _materialize_training_bundle(
@@ -770,4 +799,5 @@ def train_model_task(
     try:
         return training_result.to_json()
     except Exception:
+        # fallback to dict serialization
         return json.dumps(training_result.as_dict(), default=str)
