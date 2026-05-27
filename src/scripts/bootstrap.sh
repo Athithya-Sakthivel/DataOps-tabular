@@ -137,41 +137,61 @@ fi
 
 log "creating Python virtual environments"
 
-# flyte local environments needs only the packages that are imported at module load time
+# Flyte local environments only need packages imported at module load time
+
+# -------------------------
+# ELT environment
+# -------------------------
+
 python3 -m venv .venv_elt
-.venv_elt/bin/python -m pip install --upgrade pip wheel setuptools
+
+.venv_elt/bin/python -m pip install --upgrade \
+  pip \
+  wheel \
+  setuptools
+
 .venv_elt/bin/python -m pip install \
+  setuptools==69.5.1 \
   flytekit==1.16.15 \
   flytekitplugins-spark==1.16.15 \
   pyspark==4.1.1 \
   cloudpickle==3.1.2
-python3 -m venv .venv_train
-.venv_train/bin/python -m pip install --upgrade pip wheel setuptools
-.venv_train/bin/python -m pip install boto3==1.42.70 flytekit==1.16.16 mlflow==3.10.1 numpy==2.4.4 pandas==2.3.3 \
- lightgbm==4.6.0 onnx==1.21.0 onnxruntime==1.24.4 onnxmltools==1.16.0 pyiceberg==0.11.0 scikit-learn==1.8.0 polars==1.39.3
 
-CLOUDFLARED_VERSION="2026.3.0"
+# -------------------------
+# Training environment
+# -------------------------
+
+python3 -m venv .venv_train
+
+.venv_train/bin/python -m pip install --upgrade \
+  pip \
+  wheel \
+  setuptools
+
+.venv_train/bin/python -m pip install \
+  boto3==1.42.70 \
+  setuptools==69.5.1 \
+  flytekit==1.16.16 \
+  mlflow==3.10.1 \
+  numpy==2.4.4 \
+  pandas==2.3.3 \
+  lightgbm==4.6.0 \
+  onnx==1.21.0 \
+  onnxruntime==1.24.4 \
+  onnxmltools==1.16.0 \
+  pyiceberg==0.11.0 \
+  scikit-learn==1.8.0 \
+  polars==1.39.3
+
+
+  
+CLOUDFLARED_VERSION="2026.5.0"
 
 curl -fsSL \
   "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
   -o /usr/local/bin/cloudflared
 
 chmod +x /usr/local/bin/cloudflared
-
-# curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs
-# cd src/frontend && npm install --package-lock-only --no-audit --no-fund
-
-# local testing requries all packages
-python3 -m venv .venv_deploy
-.venv_deploy/bin/python -m pip install --upgrade pip wheel setuptools
-.venv_deploy/bin/python -m pip install -r src/workflows/deploy/requirements.txt
-
-python3 -m venv .venv_auth
-.venv_auth/bin/python -m pip install --upgrade pip wheel setuptools
-.venv_auth/bin/python -m pip install -r src/workflows/auth/requirements.txt
-
-docker run --rm -v "$PWD/src/frontend:/app" -w /app node:22.22.2-bullseye \
-  bash -lc 'npm install --package-lock-only --no-audit --no-fund'
 
 log "installing Python packages"
 python3 -m pip install --no-cache-dir --break-system-packages \
