@@ -24,7 +24,6 @@ from workflows.train.shared_utils import (
     CandidateConfig,
     CandidateReport,
     TrainingResult,
-    build_artifact_plan,
     build_category_levels,
     build_training_result,
     clip_seconds,
@@ -313,6 +312,53 @@ def _search_best_model_logged(
     )
 
     return best_candidate, candidate_reports, best_metrics, best_iteration
+
+
+def _build_artifact_plan_local(
+    *,
+    model_artifacts_s3_bucket: str,
+    model_artifacts_s3_prefix: str,
+    feature_version: str,
+    lineage,
+    train_eval_cutoff: str,
+):
+    """
+    Minimal local artifact plan builder that returns the same fields used by the task.
+    Returns an object with attributes: artifact_root_s3_uri, model_s3_uri, schema_s3_uri,
+    metadata_s3_uri, manifest_s3_uri. This mirrors BundleArtifactPlan shape used elsewhere.
+    """
+    prefix = (model_artifacts_s3_prefix or "").strip("/")
+    artifact_root_parts = [f"{MODEL_NAME}_{MODEL_VERSION}", str(getattr(lineage, "table_uuid", "unknown")), train_eval_cutoff]
+    artifact_root = "/".join([p for p in artifact_root_parts if p])
+
+    if prefix:
+        artifact_root_s3_uri = f"s3://{model_artifacts_s3_bucket}/{prefix}/{artifact_root}"
+    else:
+        artifact_root_s3_uri = f"s3://{model_artifacts_s3_bucket}/{artifact_root}"
+
+    model_s3_uri = f"{artifact_root_s3_uri}/{RAW_ONNX_FILENAME}"
+    schema_s3_uri = f"{artifact_root_s3_uri}/{SCHEMA_FILENAME}"
+    metadata_s3_uri = f"{artifact_root_s3_uri}/{METADATA_FILENAME}"
+    manifest_s3_uri = f"{artifact_root_s3_uri}/{MANIFEST_FILENAME}"
+
+    class _Plan:
+        def __init__(self, artifact_root_s3_uri, model_s3_uri, schema_s3_uri, metadata_s3_uri, manifest_s3_uri):
+            self.artifact_root_s3_uri = artifact_root_s3_uri
+            self.model_s3_uri = model_s3_uri
+            self.schema_s3_uri = schema_s3_uri
+            self.metadata_s3_uri = metadata_s3_uri
+            self.manifest_s3_uri = manifest_s3_uri
+
+        def as_dict(self):
+            return {
+                "artifact_root_s3_uri": self.artifact_root_s3_uri,
+                "model_s3_uri": self.model_s3_uri,
+                "schema_s3_uri": self.schema_s3_uri,
+                "metadata_s3_uri": self.metadata_s3_uri,
+                "manifest_s3_uri": self.manifest_s3_uri,
+            }
+
+    return _Plan(artifact_root_s3_uri, model_s3_uri, schema_s3_uri, metadata_s3_uri, manifest_s3_uri)
 
 
 def _onnx_output_names(onnx_model: object) -> list[str]:
@@ -609,34 +655,42 @@ def train_model_task(
     with log_step("build_artifact_plan"):
         lineage = table_snapshot_lineage(table)
 
-        # Determine bucket from either MODEL_ARTIFACTS_S3_URI or bucket env.
-        bucket = MODEL_ARTIFACTS_S3_BUCKET
+        # Determine bucket and prefix from either MODEL_ARTIFACTS_S3_URI or env vars.
+        bucket = MODEL_ARTIFACTS_S3_BUCKET or ""
+        prefix = MODEL_ARTIFACTS_S3_PREFIX or ""
+
         if MODEL_ARTIFACTS_S3_URI:
             parsed = urlparse(MODEL_ARTIFACTS_S3_URI)
             bucket = parsed.netloc
+            # preserve any path as prefix (may be empty)
+            prefix = parsed.path.lstrip("/").strip("/")
 
-        artifact_plan = build_artifact_plan(
+        # Ensure we have at least a bucket
+        if not bucket:
+            raise RuntimeError("No model artifacts S3 bucket configured (MODEL_ARTIFACTS_S3_BUCKET or MODEL_ARTIFACTS_S3_URI)")
+
+        # Use local artifact plan builder to guarantee s3:// URIs even if shared helper signature differs
+        artifact_plan = _build_artifact_plan_local(
             model_artifacts_s3_bucket=bucket,
+            model_artifacts_s3_prefix=prefix,
             feature_version=EXPECTED_FEATURE_VERSION,
             lineage=lineage,
             train_eval_cutoff=splits.train_eval_cutoff,
         )
-        logger.info("artifact_root=%s", getattr(artifact_plan, "artifact_root_s3_uri", repr(artifact_plan)))
+        logger.info("artifact_root=%s", artifact_plan.artifact_root_s3_uri)
 
+    # build category levels used in training result
     category_levels = build_category_levels(train_eval_df)
 
     with tempfile.TemporaryDirectory(prefix="trip_eta_bundle_") as tmp:
         bundle_root = Path(tmp)
 
         with log_step("export_onnx_model"):
-            # call export_onnx_model using the signature in shared_utils: (final_model, feature_count)
             onnx_model = export_onnx_model(final_model=final_model, feature_count=len(MATRIX_FEATURE_COLUMNS))
 
-        # derive output names from the exported ONNX model
         output_names = _onnx_output_names(onnx_model)
 
         with log_step("build_training_result"):
-            # call build_training_result with the exact keyword-only parameters expected by shared_utils
             training_result = build_training_result(
                 elt_contract=elt_contract,
                 lineage=lineage,

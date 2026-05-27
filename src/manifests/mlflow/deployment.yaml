@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/name: mlflow
         app.kubernetes.io/component: server
       annotations:
-        mlflow.io/config-checksum: a3f7543d9b3dfae1528a2c7fb71a03cf5c525f6d806961b49de6cd422714a974
+        mlflow.io/config-checksum: 832c48e532c8bb245317af6b6074c0c26af81662bec7ca7db80dde4efa0194c8
     spec:
       serviceAccountName: mlflow
       securityContext:
@@ -112,7 +112,7 @@ spec:
         - name: MLFLOW_DB_MIGRATE_TIMEOUT_SECONDS
           value: '900'
         - name: MLFLOW_ARTIFACTS_DESTINATION
-          value: s3://e2e-mlops-data-681802563986
+          value: s3://s3-temp-bucket-dataops-681802563986-xyz
         - name: MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE
           value: 'false'
         - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
@@ -132,7 +132,7 @@ spec:
         - name: XDG_CACHE_HOME
           value: /tmp/.cache
         - name: MLFLOW_S3_BUCKET
-          value: e2e-mlops-data-681802563986
+          value: s3-temp-bucket-dataops-681802563986-xyz
         - name: MLFLOW_S3_PREFIX
           value: ''
         - name: AWS_ACCESS_KEY_ID
