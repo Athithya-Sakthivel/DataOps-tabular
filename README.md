@@ -141,6 +141,4 @@ All aggregates are point-in-time-safe — computed only from data available befo
 | Operational DB | PostgreSQL (CloudNativePG) | Flyte catalog, MLflow backend, Iceberg metadata |
 | Training | LightGBM → ONNX | Gradient boosting → portable inference runtime |
 | Model registry | MLflow | Experiment tracking, model versioning, PyFunc serving |
-| Infrastructure | Kubernetes (Kind/EKS) | Container orchestration, RBAC, resource quotas |
-
 ---
