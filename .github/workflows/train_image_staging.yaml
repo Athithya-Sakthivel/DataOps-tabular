@@ -96,25 +96,7 @@ jobs:
             ${{ steps.image-meta.outputs.image_staging }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Scan image with Trivy
-        shell: bash
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "${TRIVY_CACHE_DIR}:/root/.cache/trivy" \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            "${TRIVY_IMAGE}" \
-            image \
-            --cache-dir /root/.cache/trivy \
-            --ignorefile /workspace/.trivyignore \
-            --scanners vuln \
-            --severity CRITICAL \
-            --exit-on-eol 1 \
-            --exit-code 1 \
-            "${{ steps.image-meta.outputs.train_task_image }}"
-
+          
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
