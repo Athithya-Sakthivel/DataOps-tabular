@@ -7,7 +7,6 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-import boto3
 import lightgbm as lgb
 import numpy as np
 import onnx
@@ -26,11 +25,10 @@ from workflows.train.shared_utils import (
     PREDICTION_COLUMN,
     PREPROCESSING_VERSION,
     TARGET_TRANSFORM,
-    BundleArtifactPlan,
     CandidateConfig,
     CandidateReport,
-    ELTContract,
     TrainingResult,
+    build_artifact_plan,
     build_bundle_contract,
     build_bundle_metadata,
     build_category_levels,
@@ -52,6 +50,7 @@ from workflows.train.shared_utils import (
     split_train_test_by_date,
     table_snapshot_lineage,
     to_log_target,
+    upload_file_to_s3,
     validate_raw_dataframe,
     write_json,
 )
@@ -66,14 +65,10 @@ ICEBERG_WAREHOUSE = os.environ.get(
 )
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "default")
 
-MODEL_ARTIFACTS_S3_BUCKET = os.environ.get(
-    "MODEL_ARTIFACTS_S3_BUCKET",
-    "e2e-mlops-data-681802563986",
-)
-MODEL_ARTIFACTS_S3_PREFIX = os.environ.get(
-    "MODEL_ARTIFACTS_S3_PREFIX",
-    "model-artifacts",
-)
+# Accept either bucket+prefix or a full s3:// URI
+MODEL_ARTIFACTS_S3_BUCKET = os.environ.get("MODEL_ARTIFACTS_S3_BUCKET", "").strip()
+MODEL_ARTIFACTS_S3_PREFIX = os.environ.get("MODEL_ARTIFACTS_S3_PREFIX", "").strip()
+MODEL_ARTIFACTS_S3_URI = os.environ.get("MODEL_ARTIFACTS_S3_URI", "").strip()
 
 USE_IAM = os.environ.get("USE_IAM", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
 
@@ -87,143 +82,7 @@ MANIFEST_FILENAME = "manifest.json"
 
 FALLBACK_EVAL_SAMPLE_CAP = 250_000
 PARITY_SAMPLE_ROWS = 128
-MAX_TRAIN_NUM_THREADS = 1
-
-
-def _normalize_s3_bucket(bucket: str) -> str:
-    value = bucket.strip()
-    if not value:
-        raise ValueError("MODEL_ARTIFACTS_S3_BUCKET must not be empty")
-    if value.startswith("s3://"):
-        raise ValueError(
-            f"MODEL_ARTIFACTS_S3_BUCKET must be a bare bucket name, got {bucket!r}"
-        )
-    if "/" in value:
-        raise ValueError(
-            f"MODEL_ARTIFACTS_S3_BUCKET must not contain a prefix, got {bucket!r}"
-        )
-    return value
-
-
-def _normalize_s3_prefix(prefix: str) -> str:
-    return prefix.strip().strip("/")
-
-
-def _normalize_cutoff_date(value: object) -> date:
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value.strip())
-        except ValueError as exc:
-            raise ValueError(
-                f"train_eval_cutoff must be an ISO date string YYYY-MM-DD, got {value!r}"
-            ) from exc
-    raise TypeError(
-        f"train_eval_cutoff must be a date, datetime, or ISO date string, got {type(value).__name__}"
-    )
-
-
-def _s3_uri(bucket: str, *parts: str) -> str:
-    clean_parts = [part.strip("/") for part in parts if part and part.strip("/")]
-    if not clean_parts:
-        return f"s3://{bucket}"
-    return f"s3://{bucket}/" + "/".join(clean_parts)
-
-
-def _parse_s3_uri(uri: str) -> tuple[str, str]:
-    parsed = urlparse(uri.strip())
-    if parsed.scheme != "s3":
-        raise ValueError(f"Expected s3:// URI, got {uri!r}")
-    if not parsed.netloc:
-        raise ValueError(f"S3 URI missing bucket name: {uri!r}")
-    bucket = parsed.netloc
-    key = parsed.path.lstrip("/")
-    if not key:
-        raise ValueError(f"S3 URI missing object key: {uri!r}")
-    return bucket, key
-
-
-def build_artifact_plan(
-    *,
-    model_artifacts_s3_bucket: str,
-    model_artifacts_s3_prefix: str,
-    feature_version: str,
-    lineage: object,
-    train_eval_cutoff: object,
-    model_name: str = MODEL_NAME,
-    model_version: str = MODEL_VERSION,
-) -> BundleArtifactPlan:
-    """
-    Build and return a BundleArtifactPlan (the canonical artifact plan used across
-    training and evaluation). This ensures the returned object implements as_dict()
-    and matches the shared_utils contract.
-    """
-    bucket = _normalize_s3_bucket(model_artifacts_s3_bucket)
-    prefix = _normalize_s3_prefix(model_artifacts_s3_prefix)
-    cutoff_date = _normalize_cutoff_date(train_eval_cutoff)
-    lineage_part = str(lineage).strip()
-    if not lineage_part:
-        raise ValueError("lineage must not be empty")
-
-    root = _s3_uri(
-        bucket,
-        prefix,
-        f"{model_name}_{model_version}",
-        feature_version,
-        lineage_part,
-        cutoff_date.isoformat(),
-    )
-
-    return BundleArtifactPlan(
-        artifact_root_s3_uri=root,
-        model_s3_uri=_s3_uri(
-            bucket,
-            prefix,
-            f"{model_name}_{model_version}",
-            feature_version,
-            lineage_part,
-            cutoff_date.isoformat(),
-            RAW_ONNX_FILENAME,
-        ),
-        schema_s3_uri=_s3_uri(
-            bucket,
-            prefix,
-            f"{model_name}_{model_version}",
-            feature_version,
-            lineage_part,
-            cutoff_date.isoformat(),
-            SCHEMA_FILENAME,
-        ),
-        metadata_s3_uri=_s3_uri(
-            bucket,
-            prefix,
-            f"{model_name}_{model_version}",
-            feature_version,
-            lineage_part,
-            cutoff_date.isoformat(),
-            METADATA_FILENAME,
-        ),
-        manifest_s3_uri=_s3_uri(
-            bucket,
-            prefix,
-            f"{model_name}_{model_version}",
-            feature_version,
-            lineage_part,
-            cutoff_date.isoformat(),
-            MANIFEST_FILENAME,
-        ),
-    )
-
-
-def upload_file_to_s3(local_path: Path, s3_uri: str, *, use_iam: bool) -> None:
-    bucket, key = _parse_s3_uri(s3_uri)
-    logger.info("uploading %s -> s3://%s/%s", local_path, bucket, key)
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-south-1"
-    s3 = boto3.client("s3", region_name=region)
-    s3.upload_file(str(local_path), bucket, key)
+MAX_TRAIN_NUM_THREADS = 3
 
 
 def _categorical_feature_names() -> list[str]:
@@ -242,103 +101,21 @@ def _categorical_feature_names() -> list[str]:
     ]
 
 
-def _validate_training_dataframe(df: pd.DataFrame, elt_contract: ELTContract) -> None:
-    expected_columns = [
-        "trip_id",
-        "pickup_ts",
-        "as_of_ts",
-        "as_of_date",
-        "schema_version",
-        "feature_version",
-        *MATRIX_FEATURE_COLUMNS,
-        LABEL_COLUMN,
-    ]
-
-    if df.empty:
-        raise ValueError("Gold dataset is empty.")
-
-    if list(df.columns) != expected_columns:
-        raise ValueError(
-            "Gold schema mismatch.\n"
-            f"Expected: {expected_columns}\n"
-            f"Actual:   {list(df.columns)}"
-        )
-    if df["schema_version"].nunique(dropna=False) != 1:
-        raise ValueError("schema_version is not single-valued.")
-    if df["feature_version"].nunique(dropna=False) != 1:
-        raise ValueError("feature_version is not single-valued.")
-    if str(df["schema_version"].iloc[0]) != elt_contract.schema_version:
-        raise ValueError(
-            f"schema_version must be {elt_contract.schema_version!r}, got {df['schema_version'].iloc[0]!r}"
-        )
-    if str(df["feature_version"].iloc[0]) != elt_contract.feature_version:
-        raise ValueError(
-            f"feature_version must be {elt_contract.feature_version!r}, got {df['feature_version'].iloc[0]!r}"
-        )
-
-    as_of_ts_dates = pd.to_datetime(df["as_of_ts"], utc=True, errors="raise").dt.date
-    as_of_date_dates = pd.to_datetime(df["as_of_date"], errors="raise").dt.date
-    if not (as_of_ts_dates == as_of_date_dates).all():
-        raise ValueError("as_of_date does not match as_of_ts.date for all rows.")
-
-    required_non_null = [
-        "trip_id",
-        "pickup_ts",
-        "as_of_ts",
-        "as_of_date",
-        "schema_version",
-        "feature_version",
-        "pickup_hour",
-        "pickup_dow",
-        "pickup_month",
-        "pickup_is_weekend",
-        "pickup_borough_id",
-        "pickup_zone_id",
-        "pickup_service_zone_id",
-        "dropoff_borough_id",
-        "dropoff_zone_id",
-        "dropoff_service_zone_id",
-        "route_pair_id",
-        "trip_count_90d_zone_hour",
-        LABEL_COLUMN,
-    ]
-    for col_name in required_non_null:
-        if df[col_name].isna().any():
-            raise ValueError(f"{col_name} contains nulls but is required to be non-null.")
-
-    for col_name in ["avg_duration_7d_zone_hour", "avg_fare_30d_zone"]:
-        if col_name not in df.columns:
-            raise ValueError(f"{col_name} is missing from the dataset.")
-
-    if not pd.to_numeric(df["pickup_hour"], errors="coerce").between(0, 23).all():
-        raise ValueError("pickup_hour must be in [0, 23].")
-    if not pd.to_numeric(df["pickup_dow"], errors="coerce").between(1, 7).all():
-        raise ValueError("pickup_dow must be in [1, 7].")
-    if not pd.to_numeric(df["pickup_month"], errors="coerce").between(1, 12).all():
-        raise ValueError("pickup_month must be in [1, 12].")
-    if not pd.to_numeric(df["pickup_is_weekend"], errors="coerce").isin([0, 1]).all():
-        raise ValueError("pickup_is_weekend must be 0 or 1.")
-    if not (pd.to_numeric(df[LABEL_COLUMN], errors="coerce") > 0).all():
-        raise ValueError("label_trip_duration_seconds must be strictly positive.")
-
-    for col_name in [
-        "pickup_borough_id",
-        "pickup_zone_id",
-        "pickup_service_zone_id",
-        "dropoff_borough_id",
-        "dropoff_zone_id",
-        "dropoff_service_zone_id",
-        "route_pair_id",
-        "trip_count_90d_zone_hour",
-    ]:
-        if (pd.to_numeric(df[col_name], errors="coerce") < 0).any():
-            raise ValueError(f"{col_name} contains negative values.")
-
-    for col_name in ["avg_duration_7d_zone_hour", "avg_fare_30d_zone"]:
-        series = pd.to_numeric(df[col_name], errors="coerce")
-        finite = series.dropna().to_numpy(dtype="float64", copy=False)
-        if np.isinf(finite).any():
-            raise ValueError(f"{col_name} contains infinite values.")
+def _normalize_cutoff_date(value: object) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"train_eval_cutoff must be an ISO date string YYYY-MM-DD, got {value!r}"
+            ) from exc
+    raise TypeError(
+        f"train_eval_cutoff must be a date, datetime, or ISO date string, got {type(value).__name__}"
+    )
 
 
 def _prepare_matrix_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -669,11 +446,32 @@ def _verify_onnx_parity(
     )
 
 
+def _parse_bucket_and_prefix_from_env() -> tuple[str, str]:
+    def split_s3_uri(uri: str) -> tuple[str, str]:
+        parsed = urlparse(uri)
+        if parsed.scheme != "s3":
+            raise ValueError(f"Expected s3:// URI, got: {uri!r}")
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        return bucket, key
+
+    if MODEL_ARTIFACTS_S3_URI:
+        bucket, key = split_s3_uri(MODEL_ARTIFACTS_S3_URI)
+        return bucket, key.strip("/")
+
+    if MODEL_ARTIFACTS_S3_BUCKET.startswith("s3://"):
+        bucket, key = split_s3_uri(MODEL_ARTIFACTS_S3_BUCKET)
+        prefix = MODEL_ARTIFACTS_S3_PREFIX or key.strip("/")
+        return bucket, prefix
+
+    return MODEL_ARTIFACTS_S3_BUCKET, MODEL_ARTIFACTS_S3_PREFIX.strip("/")
+
+
 @task(
     cache=False,
     retries=1,
-    requests=Resources(cpu="1", mem="1Gi"),
-    limits=Resources(cpu="1.5", mem="1.5Gi"),
+    requests=Resources(cpu="2", mem="3Gi"),
+    limits=Resources(cpu="3", mem="3Gi"),
 )
 def train_model_task(
     train_num_threads: int,
@@ -855,9 +653,10 @@ def train_model_task(
 
     with log_step("build_artifact_plan"):
         lineage = table_snapshot_lineage(table)
+        bucket, prefix = _parse_bucket_and_prefix_from_env()
         artifact_plan = build_artifact_plan(
-            model_artifacts_s3_bucket=MODEL_ARTIFACTS_S3_BUCKET,
-            model_artifacts_s3_prefix=MODEL_ARTIFACTS_S3_PREFIX,
+            model_artifacts_s3_bucket=bucket,
+            model_artifacts_s3_prefix=prefix,
             feature_version=EXPECTED_FEATURE_VERSION,
             lineage=lineage,
             train_eval_cutoff=splits.train_eval_cutoff,
@@ -868,103 +667,107 @@ def train_model_task(
 
     category_levels = build_category_levels(train_eval_df)
 
-    # Build canonical bundle contract and metadata using shared helpers
-    with log_step("build_bundle_contract_and_metadata"):
-        bundle_contract_json = build_bundle_contract(
-            output_names=[PREDICTION_COLUMN],
-            input_name="input",
-            feature_order=MATRIX_FEATURE_COLUMNS,
-            request_feature_order=MATRIX_FEATURE_COLUMNS,
-            engineered_feature_order=MATRIX_FEATURE_COLUMNS,
-            schema_version=EXPECTED_SCHEMA_VERSION,
-            feature_version=EXPECTED_FEATURE_VERSION,
-            preprocessing_version=PREPROCESSING_VERSION,
-            target_transform=TARGET_TRANSFORM,
-            allow_extra_features=False,
-        )
+    with tempfile.TemporaryDirectory(prefix="trip_eta_bundle_") as tmp:
+        bundle_root = Path(tmp)
 
-        bundle_metadata_json = build_bundle_metadata(
-            elt_contract=elt_contract,
-            lineage=lineage,
-            artifact_plan=artifact_plan,
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION,
-            bundle_contract_json=bundle_contract_json,
-            category_levels=category_levels,
-            selected_candidate=best_candidate,
-            candidate_reports=candidate_reports,
-            search_best_metrics=search_best_metrics,
-            inner_metrics=inner_metrics,
-            holdout_metrics=holdout_metrics,
-            holdout_baseline_metrics=holdout_baseline_metrics,
-            label_cap_seconds=label_cap_seconds,
-            train_label_p50_seconds=train_label_p50_seconds,
-            best_iteration_inner=best_iteration_inner,
-            final_num_boost_round=final_num_boost_round,
-            train_rows=len(train_eval_df),
-            test_rows=len(test_df),
-        )
+        with log_step("export_onnx_model"):
+            onnx_model = export_onnx_model(final_model, feature_order=list(MATRIX_FEATURE_COLUMNS))
+            _onnx_output_names(onnx_model)
 
-    with log_step("build_training_result"):
-        training_result = build_training_result(
-            table_identifier="gold.trip_training_matrix",
-            schema_version=EXPECTED_SCHEMA_VERSION,
-            feature_version=EXPECTED_FEATURE_VERSION,
-            preprocessing_version=PREPROCESSING_VERSION,
-            elt_contract=elt_contract,
-            lineage=lineage,
-            category_levels=category_levels,
-            selected_candidate=best_candidate,
-            candidate_reports=candidate_reports,
-            search_best_metrics=search_best_metrics,
-            inner_metrics=inner_metrics,
-            holdout_metrics=holdout_metrics,
-            holdout_baseline_metrics=holdout_baseline_metrics,
-            label_cap_seconds=label_cap_seconds,
-            train_label_p50_seconds=train_label_p50_seconds,
-            best_iteration_inner=best_iteration_inner,
-            final_num_boost_round=final_num_boost_round,
-            train_rows=len(train_eval_df),
-            test_rows=len(test_df),
-            request_feature_columns=list(MATRIX_FEATURE_COLUMNS),
-            engineered_feature_columns=list(MATRIX_FEATURE_COLUMNS),
-            model_input_columns=list(MATRIX_FEATURE_COLUMNS),
-            model_feature_columns=list(MATRIX_FEATURE_COLUMNS),
-            model_name=MODEL_NAME,
-            model_version=MODEL_VERSION,
-            bundle_contract=bundle_contract_json,
-            bundle_metadata=bundle_metadata_json,
-            artifact_plan=artifact_plan,
-        )
+        # Build canonical bundle contract and metadata
+        with log_step("build_bundle_contract_and_metadata"):
+            bundle_contract_json = build_bundle_contract(
+                output_names=[PREDICTION_COLUMN],
+                input_name="input",
+                feature_order=MATRIX_FEATURE_COLUMNS,
+                request_feature_order=MATRIX_FEATURE_COLUMNS,
+                engineered_feature_order=MATRIX_FEATURE_COLUMNS,
+                schema_version=EXPECTED_SCHEMA_VERSION,
+                feature_version=EXPECTED_FEATURE_VERSION,
+                preprocessing_version=PREPROCESSING_VERSION,
+                target_transform=TARGET_TRANSFORM,
+                allow_extra_features=False,
+            )
 
-    with log_step("export_onnx_model"):
-        onnx_model = export_onnx_model(final_model, feature_order=list(MATRIX_FEATURE_COLUMNS))
+            bundle_metadata_json = build_bundle_metadata(
+                elt_contract=elt_contract,
+                lineage=lineage,
+                artifact_plan=artifact_plan,
+                model_name=MODEL_NAME,
+                model_version=MODEL_VERSION,
+                bundle_contract_json=bundle_contract_json,
+                category_levels=category_levels,
+                selected_candidate=best_candidate,
+                candidate_reports=candidate_reports,
+                search_best_metrics=search_best_metrics,
+                inner_metrics=inner_metrics,
+                holdout_metrics=holdout_metrics,
+                holdout_baseline_metrics=holdout_baseline_metrics,
+                label_cap_seconds=label_cap_seconds,
+                train_label_p50_seconds=train_label_p50_seconds,
+                best_iteration_inner=best_iteration_inner,
+                final_num_boost_round=final_num_boost_round,
+                train_rows=len(train_eval_df),
+                test_rows=len(test_df),
+            )
 
-    with log_step("materialize_training_bundle"):
-        bundle_root = Path(tempfile.mkdtemp(prefix="trip_eta_bundle_"))
-        model_path, schema_path, metadata_path, manifest_path = _materialize_training_bundle(
-            bundle_root=bundle_root,
-            training_result=training_result,
-            onnx_model=onnx_model,
-        )
+        # Build TrainingResult with the full set of fields expected by shared_utils.TrainingResult
+        with log_step("build_training_result"):
+            training_result = build_training_result(
+                table_identifier="gold.trip_training_matrix",
+                schema_version=EXPECTED_SCHEMA_VERSION,
+                feature_version=EXPECTED_FEATURE_VERSION,
+                preprocessing_version=PREPROCESSING_VERSION,
+                elt_contract=elt_contract,
+                lineage=lineage,
+                category_levels=category_levels,
+                selected_candidate=best_candidate,
+                candidate_reports=candidate_reports,
+                search_best_metrics=search_best_metrics,
+                inner_metrics=inner_metrics,
+                holdout_metrics=holdout_metrics,
+                holdout_baseline_metrics=holdout_baseline_metrics,
+                label_cap_seconds=label_cap_seconds,
+                train_label_p50_seconds=train_label_p50_seconds,
+                best_iteration_inner=best_iteration_inner,
+                final_num_boost_round=final_num_boost_round,
+                train_rows=len(train_eval_df),
+                test_rows=len(test_df),
+                request_feature_columns=list(MATRIX_FEATURE_COLUMNS),
+                engineered_feature_columns=list(MATRIX_FEATURE_COLUMNS),
+                model_input_columns=list(MATRIX_FEATURE_COLUMNS),
+                model_feature_columns=list(MATRIX_FEATURE_COLUMNS),
+                model_name=MODEL_NAME,
+                model_version=MODEL_VERSION,
+                bundle_contract=bundle_contract_json,
+                bundle_metadata=bundle_metadata_json,
+                artifact_plan=artifact_plan,
+            )
 
-        # upload artifacts to S3
-        upload_file_to_s3(model_path, artifact_plan.model_s3_uri, use_iam=USE_IAM)
-        upload_file_to_s3(schema_path, artifact_plan.schema_s3_uri, use_iam=USE_IAM)
-        upload_file_to_s3(metadata_path, artifact_plan.metadata_s3_uri, use_iam=USE_IAM)
-        upload_file_to_s3(manifest_path, artifact_plan.manifest_s3_uri, use_iam=USE_IAM)
+        with log_step("materialize_training_bundle"):
+            model_path, schema_path, metadata_path, manifest_path = _materialize_training_bundle(
+                bundle_root=bundle_root,
+                training_result=training_result,
+                onnx_model=onnx_model,
+            )
 
-    with log_step("verify_onnx_parity"):
-        parity_sample = evenly_spaced_sample(train_eval_df, PARITY_SAMPLE_ROWS)
-        _verify_onnx_parity(
-            final_model=final_model,
-            onnx_model_path=model_path,
-            sample_df=parity_sample,
-            best_iteration=final_num_boost_round,
-        )
+        with log_step("verify_onnx_parity"):
+            parity_sample = evenly_spaced_sample(train_eval_df, PARITY_SAMPLE_ROWS)
+            _verify_onnx_parity(
+                final_model=final_model,
+                onnx_model_path=model_path,
+                sample_df=parity_sample,
+                best_iteration=final_num_boost_round,
+            )
 
-    # Final JSON result: TrainingResult provides to_json()
-    final_json = training_result.to_json() if hasattr(training_result, "to_json") else json.dumps(training_result.__dict__, default=str)
+        with log_step("upload_artifacts_to_s3"):
+            upload_file_to_s3(model_path, artifact_plan.model_s3_uri, use_iam=USE_IAM)
+            upload_file_to_s3(schema_path, artifact_plan.schema_s3_uri, use_iam=USE_IAM)
+            upload_file_to_s3(metadata_path, artifact_plan.metadata_s3_uri, use_iam=USE_IAM)
+            upload_file_to_s3(manifest_path, artifact_plan.manifest_s3_uri, use_iam=USE_IAM)
 
-    logger.info("training task complete")
-    return final_json
+    logger.info("train_model_task finished successfully")
+    try:
+        return training_result.to_json()
+    except Exception:
+        return json.dumps(training_result.as_dict(), default=str)
