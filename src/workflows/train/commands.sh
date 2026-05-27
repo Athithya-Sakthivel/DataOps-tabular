@@ -8,9 +8,6 @@ python3 -m workflows.train.run register
 python3 -m workflows.train.run train
 
 
-kubectl logs -n default postgres-cluster-1
-
-
 # (lsof -i:30081 >/dev/null 2>&1 || (kubectl -n flyte port-forward svc/flyteadmin 30081:81 >/dev/null 2>&1 & sleep 2)) && read -p "Execution ID: " id && flytectl config init --host=127.0.0.1:30081 --insecure --force >/dev/null 2>&1 && flytectl delete execution "$id" -p flytesnacks -d development && kubectl delete pod -n flytesnacks-development -l execution-id="$id"
 
 # kubectl -n flyte port-forward svc/flyteadmin 30081:81

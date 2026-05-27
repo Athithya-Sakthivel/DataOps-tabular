@@ -58,14 +58,15 @@ ICEBERG_WAREHOUSE = os.environ.get(
 )
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "default")
 
-MODEL_ARTIFACTS_S3_BUCKET = os.environ.get("MODEL_ARTIFACTS_S3_BUCKET", "").strip()
-MODEL_ARTIFACTS_S3_PREFIX = os.environ.get("MODEL_ARTIFACTS_S3_PREFIX", "").strip()
-MODEL_ARTIFACTS_S3_URI = os.environ.get("MODEL_ARTIFACTS_S3_URI", "").strip()
-
 USE_IAM = os.environ.get("USE_IAM", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "trip_eta_lgbm")
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "v1")
+
+# Read MODEL_* environment variables directly
+MODEL_ARTIFACTS_S3_BUCKET = os.environ.get("MODEL_ARTIFACTS_S3_BUCKET", "").strip()
+MODEL_ARTIFACTS_S3_PREFIX = os.environ.get("MODEL_ARTIFACTS_S3_PREFIX", "").strip()
+MODEL_ARTIFACTS_S3_URI = os.environ.get("MODEL_ARTIFACTS_S3_URI", "").strip()
 
 RAW_ONNX_FILENAME = "model.onnx"
 SCHEMA_FILENAME = "schema.json"
@@ -314,6 +315,31 @@ def _search_best_model_logged(
     return best_candidate, candidate_reports, best_metrics, best_iteration
 
 
+def _resolve_artifact_destination() -> tuple[str, str]:
+    """Resolve S3 artifact destination from environment variables."""
+    bucket = MODEL_ARTIFACTS_S3_BUCKET
+    prefix = MODEL_ARTIFACTS_S3_PREFIX
+    uri = MODEL_ARTIFACTS_S3_URI
+
+    if uri:
+        parsed = urlparse(uri)
+        bucket = parsed.netloc or bucket
+        # Extract path from URI if present
+        path = parsed.path.lstrip("/").strip("/")
+        if path:
+            prefix = path if not prefix else f"{prefix}/{path}"
+
+    logger.info("Resolved artifact destination: bucket=%r prefix=%r uri=%r", bucket, prefix, uri)
+
+    if not bucket:
+        raise RuntimeError(
+            "No model artifacts S3 bucket configured. "
+            "Set MODEL_ARTIFACTS_S3_BUCKET or MODEL_ARTIFACTS_S3_URI environment variable."
+        )
+
+    return bucket, prefix
+
+
 def _build_artifact_plan_local(
     *,
     model_artifacts_s3_bucket: str,
@@ -328,7 +354,11 @@ def _build_artifact_plan_local(
     metadata_s3_uri, manifest_s3_uri. This mirrors BundleArtifactPlan shape used elsewhere.
     """
     prefix = (model_artifacts_s3_prefix or "").strip("/")
-    artifact_root_parts = [f"{MODEL_NAME}_{MODEL_VERSION}", str(getattr(lineage, "table_uuid", "unknown")), train_eval_cutoff]
+    artifact_root_parts = [
+        f"{MODEL_NAME}_{MODEL_VERSION}",
+        str(getattr(lineage, "table_uuid", "unknown")),
+        train_eval_cutoff,
+    ]
     artifact_root = "/".join([p for p in artifact_root_parts if p])
 
     if prefix:
@@ -473,12 +503,23 @@ def _materialize_training_bundle(
     retries=1,
     requests=Resources(cpu="1", mem="1Gi"),
     limits=Resources(cpu="1.5", mem="1.5Gi"),
+    # Set MODEL_* environment variables at task level
+    environment={
+        "MODEL_ARTIFACTS_S3_BUCKET": os.environ.get("MODEL_ARTIFACTS_S3_BUCKET", ""),
+        "MODEL_ARTIFACTS_S3_PREFIX": os.environ.get("MODEL_ARTIFACTS_S3_PREFIX", ""),
+        "MODEL_ARTIFACTS_S3_URI": os.environ.get("MODEL_ARTIFACTS_S3_URI", ""),
+    },
 )
 def train_model_task(
     train_num_threads: int,
     tuning_sample_rows: int,
     max_boost_rounds: int,
 ) -> str:
+    """Train a LightGBM model for trip ETA prediction.
+    
+    Reads MODEL_ARTIFACTS_S3_BUCKET, MODEL_ARTIFACTS_S3_PREFIX, and 
+    MODEL_ARTIFACTS_S3_URI directly from environment variables.
+    """
     if train_num_threads < 1:
         raise ValueError("train_num_threads must be >= 1")
     if train_num_threads > MAX_TRAIN_NUM_THREADS:
@@ -489,6 +530,9 @@ def train_model_task(
         raise ValueError("tuning_sample_rows must be >= 1")
     if max_boost_rounds < 1:
         raise ValueError("max_boost_rounds must be >= 1")
+
+    # Resolve artifact destination from environment
+    bucket, prefix = _resolve_artifact_destination()
 
     with log_step("load_elt_contract"):
         elt_contract = load_elt_contract(
@@ -655,21 +699,7 @@ def train_model_task(
     with log_step("build_artifact_plan"):
         lineage = table_snapshot_lineage(table)
 
-        # Determine bucket and prefix from either MODEL_ARTIFACTS_S3_URI or env vars.
-        bucket = MODEL_ARTIFACTS_S3_BUCKET or ""
-        prefix = MODEL_ARTIFACTS_S3_PREFIX or ""
-
-        if MODEL_ARTIFACTS_S3_URI:
-            parsed = urlparse(MODEL_ARTIFACTS_S3_URI)
-            bucket = parsed.netloc
-            # preserve any path as prefix (may be empty)
-            prefix = parsed.path.lstrip("/").strip("/")
-
-        # Ensure we have at least a bucket
-        if not bucket:
-            raise RuntimeError("No model artifacts S3 bucket configured (MODEL_ARTIFACTS_S3_BUCKET or MODEL_ARTIFACTS_S3_URI)")
-
-        # Use local artifact plan builder to guarantee s3:// URIs even if shared helper signature differs
+        # Use local artifact plan builder to guarantee s3:// URIs
         artifact_plan = _build_artifact_plan_local(
             model_artifacts_s3_bucket=bucket,
             model_artifacts_s3_prefix=prefix,
