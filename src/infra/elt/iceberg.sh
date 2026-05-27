@@ -61,18 +61,15 @@ if [[ "${K8S_CLUSTER}" == "kind" && "${USE_IAM}" == "true" ]]; then
   exit 1
 fi
 
-if [[ "${USE_IAM}" == "true" ]]; then
-  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN || true
-fi
-
 # Pinned working image that already includes the PostgreSQL JDBC driver.
 IMAGE="${IMAGE:-ghcr.io/athithya-sakthivel/iceberg-rest:2026-04-03-20-08--861d47a@sha256:0fde6e09b4dd16c0f08165517a604d59dc0538d1b868275a46c1bf5d9b5f1bcc}"
 
 CONTAINER_PORT="${CONTAINER_PORT:-8181}"
 SERVICE_PORT="${SERVICE_PORT:-8181}"
 
-AWS_REGION="${AWS_REGION:-ap-south-1}"
-S3_BUCKET="${S3_BUCKET:-e2e-mlops-data-681802563986}"
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-south-1}}"
+AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-${AWS_REGION}}"
+S3_BUCKET="${S3_BUCKET:-}"
 S3_PREFIX="${S3_PREFIX:-iceberg/warehouse}"
 S3_ENDPOINT="${S3_ENDPOINT:-}"
 S3_PATH_STYLE_ACCESS="${S3_PATH_STYLE_ACCESS:-false}"
@@ -88,13 +85,14 @@ IAM_ROLE_ARN="${IAM_ROLE_ARN:-}"
 # PostgreSQL / CNPG defaults
 POSTGRES_NAMESPACE="${POSTGRES_NAMESPACE:-default}"
 POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres-pooler}"
+POSTGRES_CLUSTER_NAME="${POSTGRES_CLUSTER_NAME:-postgres-cluster}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_DB="${POSTGRES_DB:-iceberg}"
 POSTGRES_SECRET_NAME="${POSTGRES_SECRET_NAME:-postgres-cluster-app}"
 POSTGRES_USERNAME_KEY="${POSTGRES_USERNAME_KEY:-username}"
 POSTGRES_PASSWORD_KEY="${POSTGRES_PASSWORD_KEY:-password}"
 
-READY_TIMEOUT="${READY_TIMEOUT:-600}"
+READY_TIMEOUT="${READY_TIMEOUT:-900}"
 VALIDATE_SCRIPT="${VALIDATE_SCRIPT:-src/tests/elt/iceberg_server_validate.sh}"
 ENABLE_PDB="${ENABLE_PDB:-true}"
 
@@ -115,8 +113,6 @@ is_static_mode() {
   [[ "${USE_IAM}" == "false" ]]
 }
 
-# --- Prerequisites ------------------------------------------------------------
-
 require_bin() {
   command -v "$1" >/dev/null 2>&1 || fatal "$1 required in PATH"
 }
@@ -128,8 +124,6 @@ require_prereqs() {
   kubectl version --client >/dev/null 2>&1 || fatal "kubectl client unavailable"
   kubectl cluster-info >/dev/null 2>&1 || fatal "kubectl cannot reach cluster"
 }
-
-# --- Helpers ------------------------------------------------------------------
 
 ensure_namespace() {
   if kubectl get ns "${TARGET_NS}" >/dev/null 2>&1; then
@@ -151,6 +145,20 @@ trim_trailing_slash() {
     s="${s%/}"
   done
   printf '%s' "$s"
+}
+
+aws_account_id() {
+  aws sts get-caller-identity --query Account --output text
+}
+
+ensure_default_bucket() {
+  if [[ -n "${S3_BUCKET}" ]]; then
+    return 0
+  fi
+  local account_id
+  account_id="$(aws_account_id)"
+  S3_BUCKET="s3-temp-bucket-dataops-${account_id}-xyz"
+  export S3_BUCKET
 }
 
 warehouse_uri() {
@@ -186,7 +194,6 @@ secret_fingerprint() {
   python3 - <<'PY'
 import hashlib
 import os
-
 parts = [
     os.environ.get("AWS_REGION", ""),
     os.environ.get("S3_BUCKET", ""),
@@ -224,18 +231,27 @@ require_postgres_secret() {
   [[ -n "${password_b64}" ]] || fatal "secret ${POSTGRES_SECRET_NAME} missing key ${POSTGRES_PASSWORD_KEY}"
 }
 
-render_scheduling_block() {
-  if [[ "${K8S_CLUSTER}" == "eks" ]]; then
-    cat <<'EOF'
-      nodeSelector:
-        node-type: general
-      tolerations:
-      - key: node-type
-        operator: Equal
-        value: general
-        effect: NoSchedule
-EOF
-  fi
+wait_for_postgres_ready() {
+  log "waiting for Postgres service and pooler readiness"
+
+  local deadline now endpoints
+  deadline=$((SECONDS + READY_TIMEOUT))
+
+  kubectl -n "${POSTGRES_NAMESPACE}" rollout status deployment/"${POSTGRES_SERVICE}" --timeout="${READY_TIMEOUT}s" >/dev/null 2>&1 || true
+
+  while (( SECONDS < deadline )); do
+    endpoints="$(kubectl -n "${POSTGRES_NAMESPACE}" get endpoints "${POSTGRES_SERVICE}" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
+    if [[ -n "${endpoints}" ]]; then
+      if kubectl -n "${POSTGRES_NAMESPACE}" get pod -l "cnpg.io/cluster=${POSTGRES_CLUSTER_NAME}" >/dev/null 2>&1; then
+        kubectl -n "${POSTGRES_NAMESPACE}" wait --for=condition=Ready pod -l "cnpg.io/cluster=${POSTGRES_CLUSTER_NAME}" --timeout=10s >/dev/null 2>&1 || true
+      fi
+      log "Postgres endpoints are ready"
+      return 0
+    fi
+    sleep 2
+  done
+
+  fatal "timeout waiting for Postgres service endpoints for ${POSTGRES_SERVICE}"
 }
 
 render_serviceaccount() {
@@ -267,29 +283,7 @@ EOF
   fi
 }
 
-render_static_aws_env() {
-  local lines=""
-  lines+=$'        - name: AWS_ACCESS_KEY_ID\n'
-  lines+=$'          valueFrom:\n'
-  lines+=$'            secretKeyRef:\n'
-  lines+=$"              name: ${SECRET_NAME}\n"
-  lines+=$'              key: AWS_ACCESS_KEY_ID\n'
-  lines+=$'        - name: AWS_SECRET_ACCESS_KEY\n'
-  lines+=$'          valueFrom:\n'
-  lines+=$'            secretKeyRef:\n'
-  lines+=$"              name: ${SECRET_NAME}\n"
-  lines+=$'              key: AWS_SECRET_ACCESS_KEY\n'
-  if [[ -n "${AWS_SESSION_TOKEN}" ]]; then
-    lines+=$'        - name: AWS_SESSION_TOKEN\n'
-    lines+=$'          valueFrom:\n'
-    lines+=$'            secretKeyRef:\n'
-    lines+=$"              name: ${SECRET_NAME}\n"
-    lines+=$'              key: AWS_SESSION_TOKEN\n'
-  fi
-  printf '%s' "${lines}"
-}
-
-render_secret() {
+render_static_aws_secret() {
   if is_static_mode; then
     [[ -n "${AWS_ACCESS_KEY_ID}" ]] || fatal "AWS_ACCESS_KEY_ID is required when USE_IAM=false"
     [[ -n "${AWS_SECRET_ACCESS_KEY}" ]] || fatal "AWS_SECRET_ACCESS_KEY is required when USE_IAM=false"
@@ -313,14 +307,13 @@ render_secret() {
 }
 
 render_deployment() {
-  local warehouse s3_endpoint jdbc_uri aws_env scheduling_block
+  local warehouse s3_endpoint jdbc_uri
   warehouse="$(warehouse_uri)"
   s3_endpoint="$(normalized_s3_endpoint)"
   jdbc_uri="$(postgres_jdbc_uri)"
-  aws_env="$(render_static_aws_env)"
-  scheduling_block="$(render_scheduling_block)"
 
-  cat > "${MANIFEST_DIR}/deployment.yaml" <<EOF
+  {
+    cat <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -328,6 +321,7 @@ metadata:
   namespace: ${TARGET_NS}
 spec:
   replicas: 1
+  revisionHistoryLimit: 2
   selector:
     matchLabels:
       app: ${DEPLOYMENT_NAME}
@@ -344,7 +338,21 @@ spec:
         ${ANNOTATION_KEY}: "pending"
     spec:
       serviceAccountName: ${SERVICE_ACCOUNT_NAME}
-$(printf '%s\n' "${scheduling_block}")
+EOF
+
+    if [[ "${K8S_CLUSTER}" == "eks" ]]; then
+      cat <<'EOF'
+      nodeSelector:
+        node-type: general
+      tolerations:
+        - key: node-type
+          operator: Equal
+          value: general
+          effect: NoSchedule
+EOF
+    fi
+
+    cat <<EOF
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -366,7 +374,7 @@ $(printf '%s\n' "${scheduling_block}")
         - name: AWS_REGION
           value: "${AWS_REGION}"
         - name: AWS_DEFAULT_REGION
-          value: "${AWS_REGION}"
+          value: "${AWS_DEFAULT_REGION}"
         - name: AWS_EC2_METADATA_DISABLED
           value: "true"
         - name: CATALOG_URI
@@ -395,7 +403,33 @@ $(printf '%s\n' "${scheduling_block}")
           value: "/tmp"
         - name: TMPDIR
           value: "/tmp"
-$(if is_static_mode; then printf '%s\n' "${aws_env}"; fi)
+EOF
+
+    if is_static_mode; then
+      cat <<EOF
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: ${SECRET_NAME}
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ${SECRET_NAME}
+              key: AWS_SECRET_ACCESS_KEY
+EOF
+      if [[ -n "${AWS_SESSION_TOKEN}" ]]; then
+        cat <<EOF
+        - name: AWS_SESSION_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ${SECRET_NAME}
+              key: AWS_SESSION_TOKEN
+EOF
+      fi
+    fi
+
+    cat <<EOF
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -438,6 +472,7 @@ $(if is_static_mode; then printf '%s\n' "${aws_env}"; fi)
       - name: tmp
         emptyDir: {}
 EOF
+  } > "${MANIFEST_DIR}/deployment.yaml"
 }
 
 render_service() {
@@ -489,8 +524,8 @@ compute_manifests_hash() {
   cat "${files[@]}" > "${tmp}"
 
   printf '\nK8S_CLUSTER=%s\nUSE_IAM=%s\n' "${K8S_CLUSTER}" "${USE_IAM}" >> "${tmp}"
-  printf 'AWS_REGION=%s\nS3_BUCKET=%s\nS3_PREFIX=%s\nS3_ENDPOINT=%s\nS3_PATH_STYLE_ACCESS=%s\n' \
-    "${AWS_REGION}" "${S3_BUCKET}" "${S3_PREFIX}" "${S3_ENDPOINT}" "${S3_PATH_STYLE_ACCESS}" >> "${tmp}"
+  printf 'AWS_REGION=%s\nAWS_DEFAULT_REGION=%s\nS3_BUCKET=%s\nS3_PREFIX=%s\nS3_ENDPOINT=%s\nS3_PATH_STYLE_ACCESS=%s\n' \
+    "${AWS_REGION}" "${AWS_DEFAULT_REGION}" "${S3_BUCKET}" "${S3_PREFIX}" "${S3_ENDPOINT}" "${S3_PATH_STYLE_ACCESS}" >> "${tmp}"
 
   if is_static_mode; then
     printf '%s\n' "$(secret_fingerprint)" >> "${tmp}"
@@ -502,6 +537,15 @@ compute_manifests_hash() {
 
   sha256sum "${tmp}" | awk '{print $1}'
   rm -f "${tmp}"
+}
+
+validate_yaml() {
+  kubectl apply --dry-run=client -f "${MANIFEST_DIR}/serviceaccount.yaml" >/dev/null
+  kubectl apply --dry-run=client -f "${MANIFEST_DIR}/deployment.yaml" >/dev/null
+  kubectl apply --dry-run=client -f "${MANIFEST_DIR}/service.yaml" >/dev/null
+  if [[ -f "${MANIFEST_DIR}/pdb.yaml" ]]; then
+    kubectl apply --dry-run=client -f "${MANIFEST_DIR}/pdb.yaml" >/dev/null
+  fi
 }
 
 apply_manifests() {
@@ -518,7 +562,12 @@ apply_manifests() {
     return 0
   fi
 
+  validate_yaml
+
   kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/serviceaccount.yaml" >/dev/null
+  if is_static_mode; then
+    render_static_aws_secret
+  fi
   kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/deployment.yaml" >/dev/null
   kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/service.yaml" >/dev/null
   if [[ -f "${MANIFEST_DIR}/pdb.yaml" ]]; then
@@ -531,13 +580,12 @@ apply_manifests() {
   log "applied manifests and wrote template annotation ${ANNOTATION_KEY}=${hash}"
 }
 
-# --- Diagnostics --------------------------------------------------------------
-
 dump_diagnostics() {
   log "diagnostics: pods"
   kubectl -n "${TARGET_NS}" get pods -o wide 2>&1 || true
 
   log "diagnostics: deployment"
+  kubectl -n "${TARGET_NS}" get deployment "${DEPLOYMENT_NAME}" -o wide 2>&1 || true
   kubectl -n "${TARGET_NS}" describe deployment "${DEPLOYMENT_NAME}" 2>&1 || true
 
   log "diagnostics: service"
@@ -550,7 +598,11 @@ dump_diagnostics() {
   kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -n 80 || true
 
   log "diagnostics: logs"
-  kubectl -n "${TARGET_NS}" logs deployment/"${DEPLOYMENT_NAME}" --tail=200 2>&1 || true
+  if kubectl -n "${TARGET_NS}" get deployment "${DEPLOYMENT_NAME}" >/dev/null 2>&1; then
+    kubectl -n "${TARGET_NS}" logs deployment/"${DEPLOYMENT_NAME}" --tail=200 2>&1 || true
+  else
+    log "deployment ${DEPLOYMENT_NAME} does not exist"
+  fi
 }
 
 on_err() {
@@ -560,21 +612,115 @@ on_err() {
 }
 
 wait_for_deployment_ready() {
-  log "waiting for deployment availability (timeout=${READY_TIMEOUT}s)"
-  kubectl -n "${TARGET_NS}" wait --for=condition=Available deployment/"${DEPLOYMENT_NAME}" --timeout="${READY_TIMEOUT}s" >/dev/null \
-    || fatal "timeout waiting for deployment availability"
+  log "waiting for deployment generation sync"
+
+  kubectl -n "${TARGET_NS}" rollout status \
+    deployment/"${DEPLOYMENT_NAME}" \
+    --timeout="${READY_TIMEOUT}s"
+
+  log "waiting for deployment observed generation"
+
+  local deadline observed generation
+  deadline=$((SECONDS + READY_TIMEOUT))
+
+  while (( SECONDS < deadline )); do
+    observed="$(
+      kubectl -n "${TARGET_NS}" get deployment "${DEPLOYMENT_NAME}" \
+        -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true
+    )"
+
+    generation="$(
+      kubectl -n "${TARGET_NS}" get deployment "${DEPLOYMENT_NAME}" \
+        -o jsonpath='{.metadata.generation}' 2>/dev/null || true
+    )"
+
+    if [[ -n "${observed}" && "${observed}" == "${generation}" ]]; then
+      break
+    fi
+
+    sleep 2
+  done
+
+  log "waiting for new ReplicaSet pod"
+
+  local pod_name=""
+
+  while (( SECONDS < deadline )); do
+    pod_name="$(
+      kubectl -n "${TARGET_NS}" get pods \
+        -l "app=${DEPLOYMENT_NAME}" \
+        --field-selector=status.phase!=Succeeded,status.phase!=Failed \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+    )"
+
+    if [[ -n "${pod_name}" ]]; then
+      break
+    fi
+
+    sleep 2
+  done
+
+  [[ -n "${pod_name}" ]] || fatal "no deployment pod created"
+
+  log "waiting for pod readiness: ${pod_name}"
+
+  kubectl -n "${TARGET_NS}" wait \
+    --for=condition=Ready \
+    "pod/${pod_name}" \
+    --timeout="${READY_TIMEOUT}s"
+
+  log "verifying container readiness"
+
+  local ready="false"
+
+  while (( SECONDS < deadline )); do
+    ready="$(
+      kubectl -n "${TARGET_NS}" get pod "${pod_name}" \
+        -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true
+    )"
+
+    if [[ "${ready}" == "true" ]]; then
+      break
+    fi
+
+    kubectl -n "${TARGET_NS}" logs "${pod_name}" --tail=20 2>/dev/null || true
+
+    sleep 5
+  done
+
+  [[ "${ready}" == "true" ]] || fatal "container never became ready"
+
+  log "waiting for service endpoints"
+
+  while (( SECONDS < deadline )); do
+    local endpoints
+
+    endpoints="$(
+      kubectl -n "${TARGET_NS}" get endpoints "${SERVICE_NAME}" \
+        -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true
+    )"
+
+    if [[ -n "${endpoints}" ]]; then
+      break
+    fi
+
+    sleep 2
+  done
+
+  [[ -n "${endpoints:-}" ]] || fatal "service endpoints never became ready"
+
   log "deployment ready"
 }
-
-# --- Main Operations ----------------------------------------------------------
 
 rollout() {
   local run_validate="${1:-false}"
 
   require_prereqs
+  ensure_default_bucket
   mkdir -p "${MANIFEST_DIR}"
   ensure_namespace
   require_postgres_secret
+  wait_for_postgres_ready
 
   log "starting iceberg rollout"
   log "namespace=${TARGET_NS}"
@@ -584,23 +730,24 @@ rollout() {
   log "rest_url=$(rest_base_url)"
   log "warehouse=$(warehouse_uri)"
   log "aws_region=${AWS_REGION}"
+  log "aws_default_region=${AWS_DEFAULT_REGION}"
   log "s3_endpoint=$(normalized_s3_endpoint)"
   log "s3_path_style_access=${S3_PATH_STYLE_ACCESS}"
+  log "bucket=${S3_BUCKET}"
   log "secret_name=${SECRET_NAME}"
   log "postgres_namespace=${POSTGRES_NAMESPACE}"
   log "postgres_service=${POSTGRES_SERVICE}"
+  log "postgres_cluster_name=${POSTGRES_CLUSTER_NAME}"
   log "postgres_port=${POSTGRES_PORT}"
   log "postgres_db=${POSTGRES_DB}"
   log "postgres_secret_name=${POSTGRES_SECRET_NAME}"
   log "validate=${run_validate}"
 
   render_serviceaccount
-  render_secret
   render_deployment
   render_service
   render_pdb
   apply_manifests
-  wait_for_deployment_ready
 
   if [[ "${run_validate}" == "true" ]]; then
     if [[ -x "${VALIDATE_SCRIPT}" ]]; then
@@ -648,14 +795,13 @@ Environment:
   USE_IAM=true|false
   IAM_ROLE_ARN=<arn>      Required when USE_IAM=true
   ENABLE_PDB=true|false
+  S3_BUCKET=<bucket>      Optional; defaults to s3-temp-bucket-dataops-<account>-xyz
 
 Examples:
   K8S_CLUSTER=kind USE_IAM=false $0 --rollout
   K8S_CLUSTER=eks USE_IAM=true IAM_ROLE_ARN=arn:aws:iam::123456789012:role/iceberg-s3 $0 --rollout --validate
 EOF
 }
-
-# --- Entry Point --------------------------------------------------------------
 
 main() {
   local run_validate="false"

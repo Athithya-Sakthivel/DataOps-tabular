@@ -73,7 +73,7 @@ MANIFEST_FILENAME = "manifest.json"
 
 FALLBACK_EVAL_SAMPLE_CAP = 250_000
 PARITY_SAMPLE_ROWS = 128
-MAX_TRAIN_NUM_THREADS = 3
+MAX_TRAIN_NUM_THREADS = 1
 
 
 def _categorical_feature_names() -> list[str]:
@@ -523,8 +523,8 @@ def _verify_onnx_parity(
 @task(
     cache=False,
     retries=1,
-    requests=Resources(cpu="2", mem="3Gi"),
-    limits=Resources(cpu="3", mem="3Gi"),
+    requests=Resources(cpu="1", mem="1Gi"),
+    limits=Resources(cpu="1.5", mem="1.5Gi"),
 )
 def train_model_task(
     train_num_threads: int,

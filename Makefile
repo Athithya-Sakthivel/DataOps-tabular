@@ -37,7 +37,7 @@ prune-train:
 
 temp-s3:
 	ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text); \
-	BUCKET=s3-temp-bucket-mlsecops-$$ACCOUNT_ID; \
+	BUCKET=s3-temp-bucket-dataops-$$ACCOUNT_ID-xyz; \
 	REGION=$$AWS_REGION; \
 	if ! aws s3api head-bucket --bucket $$BUCKET 2>/dev/null; then \
 		aws s3api create-bucket \
@@ -51,7 +51,7 @@ temp-s3:
 
 delete-temp-s3:
 	ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text); \
-	BUCKET=s3-temp-bucket-mlsecops-$$ACCOUNT_ID; \
+	BUCKET=s3-temp-bucket-dataops-$$ACCOUNT_ID-xyz; \
 	REGION=$$AWS_REGION; \
 	if aws s3api head-bucket --bucket $$BUCKET 2>/dev/null; then \
 		aws s3 rm s3://$$BUCKET --recursive; \

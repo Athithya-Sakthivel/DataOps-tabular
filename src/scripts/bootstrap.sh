@@ -44,54 +44,6 @@ sudo apt-get install -y -qq \
   jq \
   wget
 
-log "configuring OpenTofu apt repo"
-sudo install -m 0755 -d /etc/apt/keyrings
-
-curl -fsSL https://get.opentofu.org/opentofu.gpg \
-  | sudo tee /etc/apt/keyrings/opentofu.gpg >/dev/null
-
-curl -fsSL https://packages.opentofu.org/opentofu/tofu/gpgkey \
-  | sudo gpg --dearmor -o "${TMPDIR}/opentofu-repo.gpg" >/dev/null
-
-sudo mv "${TMPDIR}/opentofu-repo.gpg" /etc/apt/keyrings/opentofu-repo.gpg
-sudo chmod a+r /etc/apt/keyrings/opentofu.gpg /etc/apt/keyrings/opentofu-repo.gpg
-
-echo "deb [signed-by=/etc/apt/keyrings/opentofu.gpg,/etc/apt/keyrings/opentofu-repo.gpg] https://packages.opentofu.org/opentofu/tofu/any/ any main" \
-  | sudo tee /etc/apt/sources.list.d/opentofu.list >/dev/null
-sudo chmod a+r /etc/apt/sources.list.d/opentofu.list
-
-log "refreshing apt metadata after repo add"
-sudo apt-get update -qq
-
-log "resolving installable tofu version"
-CANDIDATE="$(apt-cache policy tofu 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
-
-if [[ -z "${CANDIDATE}" || "${CANDIDATE}" == "(none)" ]]; then
-  warn "apt Candidate empty, trying apt-cache madison"
-  CANDIDATE="$(apt-cache madison tofu 2>/dev/null | awk '{print $3}' | sed -n '1p' || true)"
-fi
-
-if [[ -z "${CANDIDATE}" || "${CANDIDATE}" == "(none)" ]]; then
-  warn "apt-cache madison returned nothing, falling back to package index scrape"
-  CANDIDATE="$(
-    curl -fsSL https://packages.opentofu.org/opentofu/tofu/packages/any/any/ \
-      | grep -oE 'tofu_[0-9]+\.[0-9]+\.[0-9](_[0-9]+)?_amd64\.deb' \
-      | sed -E 's/^tofu_([0-9]+\.[0-9]+\.[0-9]).*$/\1/' \
-      | sort -V \
-      | tail -n1 \
-      || true
-  )"
-fi
-
-[[ -n "${CANDIDATE}" && "${CANDIDATE}" != "(none)" ]] || fatal "No installable tofu version found in APT repo"
-
-log "installing tofu ${CANDIDATE}"
-sudo apt-get install -y --allow-downgrades "tofu=${CANDIDATE}" || {
-  apt-cache policy tofu || true
-  fatal "apt install failed for tofu=${CANDIDATE}"
-}
-sudo apt-mark hold tofu
-
 log "installing kubectl into /usr/local/bin"
 KUBECTL_VERSION="v1.30.1"
 curl -fsSL -o "${TMPDIR}/kubectl" \
@@ -184,15 +136,6 @@ python3 -m venv .venv_train
   polars==1.39.3
 
 
-  
-CLOUDFLARED_VERSION="2026.5.0"
-
-curl -fsSL \
-  "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
-  -o /usr/local/bin/cloudflared
-
-chmod +x /usr/local/bin/cloudflared
-
 log "installing Python packages"
 python3 -m pip install --no-cache-dir --break-system-packages \
   pyarrow==23.0.1 \
@@ -212,8 +155,6 @@ aws --version
 ruff version
 pre-commit --version
 kubectl version --client
-cloudflared --version
-tofu version
 flytectl version
 
 log "done"

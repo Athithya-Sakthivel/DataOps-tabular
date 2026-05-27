@@ -5,6 +5,12 @@ export TRAIN_PROFILE="${TRAIN_PROFILE:-staging}"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 source .venv_train/bin/activate
 
+export train_num_threads=1
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
 python -m workflows.train.run register
 python -m workflows.train.run train
 

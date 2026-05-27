@@ -276,8 +276,8 @@ def _downsample_for_evaluation(df: pd.DataFrame, max_rows: int) -> pd.DataFrame:
 @task(
     cache=False,
     retries=1,
-    requests=Resources(cpu="1", mem="2Gi"),
-    limits=Resources(cpu="2", mem="3Gi"),
+    requests=Resources(cpu="0.5", mem="1Gi"),
+    limits=Resources(cpu="2", mem="2Gi"),
 )
 def evaluate_and_register_task(
     training_result_json: str,

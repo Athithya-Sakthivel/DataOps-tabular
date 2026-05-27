@@ -553,9 +553,19 @@ def pyflyte_register_supports_service_account() -> bool:
 
 def build_register_env() -> dict[str, str]:
     register_env = os.environ.copy()
+
     register_env["ELT_TASK_IMAGE"] = ELT_TASK_IMAGE
+
     existing_pythonpath = register_env.get("PYTHONPATH", "")
-    register_env["PYTHONPATH"] = str(SRC_ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+    register_env["PYTHONPATH"] = (
+        str(SRC_ROOT)
+        + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+    )
+
+    # Force pyflyte to use the active local flyteadmin port-forward
+    register_env["FLYTE_PLATFORM_URL"] = f"{FLYTE_ADMIN_HOST}:{FLYTE_ADMIN_PORT}"
+    register_env["FLYTE_PLATFORM_INSECURE"] = "True"
+
     return register_env
 
 
@@ -725,9 +735,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     import_check()
     ensure_namespace_bootstrap_ready()
     start_port_forward()
-    registration_version = register_entities()
     init_flytectl()
-
+    registration_version = register_entities()
+    
     launch_plan_names = resolve_launch_plan_names()
     log(f"Resolved launch plans: elt={launch_plan_names['elt']}, daily={launch_plan_names['daily']}, weekly={launch_plan_names['weekly']}")
 

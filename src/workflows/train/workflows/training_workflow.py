@@ -8,7 +8,7 @@ from workflows.train.tasks.train_model_task import train_model_task
 
 @workflow
 def train(
-    train_num_threads: int = 2,
+    train_num_threads: int = 1,
     tuning_sample_rows: int = 100_000,
     max_boost_rounds: int = 5_000,
     mlflow_experiment_name: str = "trip_eta_lgbm",

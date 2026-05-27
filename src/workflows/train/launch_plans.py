@@ -4,7 +4,7 @@ from flytekit import LaunchPlan
 
 from workflows.train.workflows.training_workflow import train
 
-DEFAULT_TRAIN_NUM_THREADS = 2
+DEFAULT_TRAIN_NUM_THREADS = 1
 DEFAULT_TUNING_SAMPLE_ROWS = 100_000
 DEFAULT_MAX_BOOST_ROUNDS = 5_000
 DEFAULT_MLFLOW_EXPERIMENT_NAME = "trip_eta_lgbm"

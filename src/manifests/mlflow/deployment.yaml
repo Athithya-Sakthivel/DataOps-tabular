@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/name: mlflow
         app.kubernetes.io/component: server
       annotations:
-        mlflow.io/config-checksum: 6bd3963bdeba59fa363098229b1a57e34e350c943f06290a50451ff15697cf1b
+        mlflow.io/config-checksum: a3f7543d9b3dfae1528a2c7fb71a03cf5c525f6d806961b49de6cd422714a974
     spec:
       serviceAccountName: mlflow
       securityContext:
