@@ -42,6 +42,7 @@ ICEBERG_WAREHOUSE = os.environ.get(
     "ICEBERG_WAREHOUSE",
     "s3://e2e-mlops-data-681802563986/iceberg/warehouse/",
 )
+
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "default")
 MLFLOW_TRACKING_URI = os.environ.get(
     "MLFLOW_TRACKING_URI",
