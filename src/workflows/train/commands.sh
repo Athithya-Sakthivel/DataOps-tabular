@@ -1,18 +1,14 @@
 ruff check src/workflows/train --fix
-export S3_BUCKET=${S3_BUCKET:-s3-temp-bucket-mlsecops-681802563986}
-export TRAIN_TASK_IMAGE="ghcr.io/athithya-sakthivel/flyte-train-task:2026-04-12-10-22--b18cabb@sha256:9e94cdfa439643d8d4977cd48b7703d13afa660948b64255c36037796cb7da94"
+
 export TRAIN_PROFILE="${TRAIN_PROFILE:-staging}"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 source .venv_train/bin/activate
 
-export train_num_threads=1
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
+export MODEL_ARTIFACTS_S3_BUCKET=$S3_BUCKET
+python3 -m workflows.train.run up
+python3 -m workflows.train.run register
+python3 -m workflows.train.run train
 
-python -m workflows.train.run register
-python -m workflows.train.run train
 
 # delete an execution by its id as input example afrr9jtjsj2fnnwnxm75
 

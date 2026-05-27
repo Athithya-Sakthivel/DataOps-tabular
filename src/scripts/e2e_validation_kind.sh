@@ -1,7 +1,7 @@
 make delete-temp-s3
 
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 export S3_BUCKET=s3-temp-bucket-dataops-${ACCOUNT_ID}-xyz
 export MLFLOW_S3_BUCKET=$S3_BUCKET

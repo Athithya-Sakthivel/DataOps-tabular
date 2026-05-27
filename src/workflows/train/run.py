@@ -46,7 +46,6 @@ def split_namespaces(value: str) -> list[str]:
             out.append(part)
     return out
 
-
 REMOTE_PROJECT = _env_str("REMOTE_PROJECT", "flytesnacks")
 REMOTE_DOMAIN = _env_str("REMOTE_DOMAIN", "development")
 TASK_NAMESPACE = _env_str("TRAIN_NAMESPACE", f"{REMOTE_PROJECT}-{REMOTE_DOMAIN}")
@@ -63,7 +62,7 @@ if TRAIN_PROFILE not in {"staging", "prod"}:
     raise RuntimeError(f"TRAIN_PROFILE must be 'staging' or 'prod', got {TRAIN_PROFILE!r}")
 
 TRAIN_SERVICE_ACCOUNT = _env_str("TRAIN_SERVICE_ACCOUNT", "ray") or "ray"
-TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE")
+TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE","ghcr.io/athithya-sakthivel/flyte-train-task:2026-05-27-09-38--0b5f0ae@sha256:00a47e07e4605544f6232f21da0f3dde9a28e493c6048d762d0edb94fefacf91")
 if not TRAIN_TASK_IMAGE:
     raise RuntimeError("TRAIN_TASK_IMAGE environment variable must be set and non-empty")
 
@@ -97,11 +96,11 @@ TASK_NAMESPACE_PODS = _env_str("TRAIN_TASK_NAMESPACE_PODS", "60")
 TASK_NAMESPACE_PVC = _env_str("TRAIN_TASK_NAMESPACE_PVC", "40")
 TASK_NAMESPACE_SERVICES = _env_str("TRAIN_TASK_NAMESPACE_SERVICES", "50")
 
-TRAIN_TASK_REQUESTS_CPU = _env_str("TRAIN_TASK_REQUESTS_CPU", "2")
+TRAIN_TASK_REQUESTS_CPU = _env_str("TRAIN_TASK_REQUESTS_CPU", "1")
 TRAIN_TASK_REQUESTS_MEMORY = _env_str("TRAIN_TASK_REQUESTS_MEMORY", "3Gi")
-TRAIN_TASK_LIMITS_CPU = _env_str("TRAIN_TASK_LIMITS_CPU", "3")
+TRAIN_TASK_LIMITS_CPU = _env_str("TRAIN_TASK_LIMITS_CPU", "1.5")
 TRAIN_TASK_LIMITS_MEMORY = _env_str("TRAIN_TASK_LIMITS_MEMORY", "4Gi")
-TRAIN_DEFAULT_NUM_THREADS = _env_str("TRAIN_DEFAULT_NUM_THREADS", "2")
+TRAIN_DEFAULT_NUM_THREADS = _env_str("TRAIN_DEFAULT_NUM_THREADS", "1")
 
 DB_SECRET_NAME = _env_str("DB_SECRET_NAME", "db-pass")
 TASK_AWS_SECRET_NAME = _env_str("TASK_AWS_SECRET_NAME", "flyte-aws-credentials")

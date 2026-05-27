@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from urllib.parse import urlparse
 
+import boto3
 import lightgbm as lgb
 import numpy as np
 import onnx
@@ -23,7 +27,6 @@ from workflows.train.shared_utils import (
     CandidateReport,
     ELTContract,
     TrainingResult,
-    build_artifact_plan,
     build_category_levels,
     build_training_result,
     clip_seconds,
@@ -43,7 +46,6 @@ from workflows.train.shared_utils import (
     split_train_test_by_date,
     table_snapshot_lineage,
     to_log_target,
-    upload_file_to_s3,
     validate_raw_dataframe,
     write_json,
 )
@@ -57,10 +59,16 @@ ICEBERG_WAREHOUSE = os.environ.get(
     "s3://e2e-mlops-data-681802563986/iceberg/warehouse/",
 )
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "default")
+
 MODEL_ARTIFACTS_S3_BUCKET = os.environ.get(
     "MODEL_ARTIFACTS_S3_BUCKET",
-    "s3://e2e-mlops-data-681802563986/model-artifacts",
+    "e2e-mlops-data-681802563986",
 )
+MODEL_ARTIFACTS_S3_PREFIX = os.environ.get(
+    "MODEL_ARTIFACTS_S3_PREFIX",
+    "model-artifacts",
+)
+
 USE_IAM = os.environ.get("USE_IAM", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "trip_eta_lgbm")
@@ -74,6 +82,104 @@ MANIFEST_FILENAME = "manifest.json"
 FALLBACK_EVAL_SAMPLE_CAP = 250_000
 PARITY_SAMPLE_ROWS = 128
 MAX_TRAIN_NUM_THREADS = 1
+
+
+@dataclass(frozen=True)
+class ArtifactPlan:
+    artifact_root_s3_uri: str
+    model_s3_uri: str
+    schema_s3_uri: str
+    metadata_s3_uri: str
+    manifest_s3_uri: str
+
+
+def _normalize_s3_bucket(bucket: str) -> str:
+    value = bucket.strip()
+    if not value:
+        raise ValueError("MODEL_ARTIFACTS_S3_BUCKET must not be empty")
+    if value.startswith("s3://"):
+        raise ValueError(
+            f"MODEL_ARTIFACTS_S3_BUCKET must be a bare bucket name, got {bucket!r}"
+        )
+    if "/" in value:
+        raise ValueError(
+            f"MODEL_ARTIFACTS_S3_BUCKET must not contain a prefix, got {bucket!r}"
+        )
+    return value
+
+
+def _normalize_s3_prefix(prefix: str) -> str:
+    return prefix.strip().strip("/")
+
+
+def _s3_uri(bucket: str, *parts: str) -> str:
+    clean_parts = [part.strip("/") for part in parts if part and part.strip("/")]
+    if not clean_parts:
+        return f"s3://{bucket}"
+    return f"s3://{bucket}/" + "/".join(clean_parts)
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    value = uri.strip()
+    parsed = urlparse(value)
+    if parsed.scheme != "s3":
+        raise ValueError(f"Expected s3:// URI, got {uri!r}")
+    if not parsed.netloc:
+        raise ValueError(f"S3 URI missing bucket name: {uri!r}")
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+    if not key:
+        raise ValueError(f"S3 URI missing object key: {uri!r}")
+    return bucket, key
+
+
+def build_artifact_plan(
+    *,
+    model_artifacts_s3_bucket: str,
+    model_artifacts_s3_prefix: str,
+    feature_version: str,
+    lineage: object,
+    train_eval_cutoff: date,
+    model_name: str = MODEL_NAME,
+    model_version: str = MODEL_VERSION,
+) -> ArtifactPlan:
+    bucket = _normalize_s3_bucket(model_artifacts_s3_bucket)
+    prefix = _normalize_s3_prefix(model_artifacts_s3_prefix)
+    lineage_part = str(lineage).strip()
+    if not lineage_part:
+        raise ValueError("lineage must not be empty")
+
+    artifact_root = _s3_uri(
+        bucket,
+        prefix,
+        f"{model_name}_{model_version}",
+        lineage_part,
+        train_eval_cutoff.isoformat(),
+    )
+
+    return ArtifactPlan(
+        artifact_root_s3_uri=artifact_root,
+        model_s3_uri=_s3_uri(
+            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), RAW_ONNX_FILENAME
+        ),
+        schema_s3_uri=_s3_uri(
+            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), SCHEMA_FILENAME
+        ),
+        metadata_s3_uri=_s3_uri(
+            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), METADATA_FILENAME
+        ),
+        manifest_s3_uri=_s3_uri(
+            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), MANIFEST_FILENAME
+        ),
+    )
+
+
+def upload_file_to_s3(local_path: Path, s3_uri: str, *, use_iam: bool) -> None:
+    bucket, key = _parse_s3_uri(s3_uri)
+    logger.info("uploading %s -> s3://%s/%s", local_path, bucket, key)
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-south-1"
+    s3 = boto3.client("s3", region_name=region)
+    s3.upload_file(str(local_path), bucket, key)
 
 
 def _categorical_feature_names() -> list[str]:
@@ -708,9 +814,12 @@ def train_model_task(
         lineage = table_snapshot_lineage(table)
         artifact_plan = build_artifact_plan(
             model_artifacts_s3_bucket=MODEL_ARTIFACTS_S3_BUCKET,
+            model_artifacts_s3_prefix=MODEL_ARTIFACTS_S3_PREFIX,
             feature_version=EXPECTED_FEATURE_VERSION,
             lineage=lineage,
             train_eval_cutoff=splits.train_eval_cutoff,
+            model_name=MODEL_NAME,
+            model_version=MODEL_VERSION,
         )
         logger.info("artifact_root=%s", artifact_plan.artifact_root_s3_uri)
 
