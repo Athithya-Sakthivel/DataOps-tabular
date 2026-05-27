@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
-from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,10 +23,16 @@ from workflows.train.shared_utils import (
     LABEL_COLUMN,
     MATRIX_FEATURE_COLUMNS,
     MODEL_FAMILY,
+    PREDICTION_COLUMN,
+    PREPROCESSING_VERSION,
+    TARGET_TRANSFORM,
+    BundleArtifactPlan,
     CandidateConfig,
     CandidateReport,
     ELTContract,
     TrainingResult,
+    build_bundle_contract,
+    build_bundle_metadata,
     build_category_levels,
     build_training_result,
     clip_seconds,
@@ -82,15 +88,6 @@ MANIFEST_FILENAME = "manifest.json"
 FALLBACK_EVAL_SAMPLE_CAP = 250_000
 PARITY_SAMPLE_ROWS = 128
 MAX_TRAIN_NUM_THREADS = 1
-
-
-@dataclass(frozen=True)
-class ArtifactPlan:
-    artifact_root_s3_uri: str
-    model_s3_uri: str
-    schema_s3_uri: str
-    metadata_s3_uri: str
-    manifest_s3_uri: str
 
 
 def _normalize_s3_bucket(bucket: str) -> str:
@@ -158,7 +155,12 @@ def build_artifact_plan(
     train_eval_cutoff: object,
     model_name: str = MODEL_NAME,
     model_version: str = MODEL_VERSION,
-) -> ArtifactPlan:
+) -> BundleArtifactPlan:
+    """
+    Build and return a BundleArtifactPlan (the canonical artifact plan used across
+    training and evaluation). This ensures the returned object implements as_dict()
+    and matches the shared_utils contract.
+    """
     bucket = _normalize_s3_bucket(model_artifacts_s3_bucket)
     prefix = _normalize_s3_prefix(model_artifacts_s3_prefix)
     cutoff_date = _normalize_cutoff_date(train_eval_cutoff)
@@ -175,19 +177,43 @@ def build_artifact_plan(
         cutoff_date.isoformat(),
     )
 
-    return ArtifactPlan(
+    return BundleArtifactPlan(
         artifact_root_s3_uri=root,
         model_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), RAW_ONNX_FILENAME
+            bucket,
+            prefix,
+            f"{model_name}_{model_version}",
+            feature_version,
+            lineage_part,
+            cutoff_date.isoformat(),
+            RAW_ONNX_FILENAME,
         ),
         schema_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), SCHEMA_FILENAME
+            bucket,
+            prefix,
+            f"{model_name}_{model_version}",
+            feature_version,
+            lineage_part,
+            cutoff_date.isoformat(),
+            SCHEMA_FILENAME,
         ),
         metadata_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), METADATA_FILENAME
+            bucket,
+            prefix,
+            f"{model_name}_{model_version}",
+            feature_version,
+            lineage_part,
+            cutoff_date.isoformat(),
+            METADATA_FILENAME,
         ),
         manifest_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), MANIFEST_FILENAME
+            bucket,
+            prefix,
+            f"{model_name}_{model_version}",
+            feature_version,
+            lineage_part,
+            cutoff_date.isoformat(),
+            MANIFEST_FILENAME,
         ),
     )
 
@@ -842,14 +868,49 @@ def train_model_task(
 
     category_levels = build_category_levels(train_eval_df)
 
-    with tempfile.TemporaryDirectory(prefix="trip_eta_bundle_") as tmp:
-        bundle_root = Path(tmp)
+    # Build canonical bundle contract and metadata using shared helpers
+    with log_step("build_bundle_contract_and_metadata"):
+        bundle_contract_json = build_bundle_contract(
+            output_names=[PREDICTION_COLUMN],
+            input_name="input",
+            feature_order=MATRIX_FEATURE_COLUMNS,
+            request_feature_order=MATRIX_FEATURE_COLUMNS,
+            engineered_feature_order=MATRIX_FEATURE_COLUMNS,
+            schema_version=EXPECTED_SCHEMA_VERSION,
+            feature_version=EXPECTED_FEATURE_VERSION,
+            preprocessing_version=PREPROCESSING_VERSION,
+            target_transform=TARGET_TRANSFORM,
+            allow_extra_features=False,
+        )
 
-        with log_step("export_onnx_model"):
-            onnx_model = export_onnx_model(final_model, feature_count=len(MATRIX_FEATURE_COLUMNS))
-            output_names = _onnx_output_names(onnx_model)
+        bundle_metadata_json = build_bundle_metadata(
+            elt_contract=elt_contract,
+            lineage=lineage,
+            artifact_plan=artifact_plan,
+            model_name=MODEL_NAME,
+            model_version=MODEL_VERSION,
+            bundle_contract_json=bundle_contract_json,
+            category_levels=category_levels,
+            selected_candidate=best_candidate,
+            candidate_reports=candidate_reports,
+            search_best_metrics=search_best_metrics,
+            inner_metrics=inner_metrics,
+            holdout_metrics=holdout_metrics,
+            holdout_baseline_metrics=holdout_baseline_metrics,
+            label_cap_seconds=label_cap_seconds,
+            train_label_p50_seconds=train_label_p50_seconds,
+            best_iteration_inner=best_iteration_inner,
+            final_num_boost_round=final_num_boost_round,
+            train_rows=len(train_eval_df),
+            test_rows=len(test_df),
+        )
 
+    with log_step("build_training_result"):
         training_result = build_training_result(
+            table_identifier="gold.trip_training_matrix",
+            schema_version=EXPECTED_SCHEMA_VERSION,
+            feature_version=EXPECTED_FEATURE_VERSION,
+            preprocessing_version=PREPROCESSING_VERSION,
             elt_contract=elt_contract,
             lineage=lineage,
             category_levels=category_levels,
@@ -865,35 +926,45 @@ def train_model_task(
             final_num_boost_round=final_num_boost_round,
             train_rows=len(train_eval_df),
             test_rows=len(test_df),
-            artifact_plan=artifact_plan,
+            request_feature_columns=list(MATRIX_FEATURE_COLUMNS),
+            engineered_feature_columns=list(MATRIX_FEATURE_COLUMNS),
+            model_input_columns=list(MATRIX_FEATURE_COLUMNS),
+            model_feature_columns=list(MATRIX_FEATURE_COLUMNS),
             model_name=MODEL_NAME,
             model_version=MODEL_VERSION,
-            output_names=output_names,
+            bundle_contract=bundle_contract_json,
+            bundle_metadata=bundle_metadata_json,
+            artifact_plan=artifact_plan,
         )
 
-        with log_step("materialize_local_bundle"):
-            model_path, schema_path, metadata_path, manifest_path = _materialize_training_bundle(
-                bundle_root=bundle_root,
-                training_result=training_result,
-                onnx_model=onnx_model,
-            )
+    with log_step("export_onnx_model"):
+        onnx_model = export_onnx_model(final_model, feature_order=list(MATRIX_FEATURE_COLUMNS))
 
-        with log_step("onnx_parity_check"):
-            _verify_onnx_parity(
-                final_model=final_model,
-                onnx_model_path=model_path,
-                sample_df=test_eval_df,
-                best_iteration=final_num_boost_round,
-            )
+    with log_step("materialize_training_bundle"):
+        bundle_root = Path(tempfile.mkdtemp(prefix="trip_eta_bundle_"))
+        model_path, schema_path, metadata_path, manifest_path = _materialize_training_bundle(
+            bundle_root=bundle_root,
+            training_result=training_result,
+            onnx_model=onnx_model,
+        )
 
-        with log_step("upload_artifacts_to_s3"):
-            upload_file_to_s3(model_path, artifact_plan.model_s3_uri, use_iam=USE_IAM)
-            upload_file_to_s3(schema_path, artifact_plan.schema_s3_uri, use_iam=USE_IAM)
-            upload_file_to_s3(metadata_path, artifact_plan.metadata_s3_uri, use_iam=USE_IAM)
-            upload_file_to_s3(manifest_path, artifact_plan.manifest_s3_uri, use_iam=USE_IAM)
+        # upload artifacts to S3
+        upload_file_to_s3(model_path, artifact_plan.model_s3_uri, use_iam=USE_IAM)
+        upload_file_to_s3(schema_path, artifact_plan.schema_s3_uri, use_iam=USE_IAM)
+        upload_file_to_s3(metadata_path, artifact_plan.metadata_s3_uri, use_iam=USE_IAM)
+        upload_file_to_s3(manifest_path, artifact_plan.manifest_s3_uri, use_iam=USE_IAM)
 
-    logger.info("train_model_task finished successfully")
-    return training_result.to_json()
+    with log_step("verify_onnx_parity"):
+        parity_sample = evenly_spaced_sample(train_eval_df, PARITY_SAMPLE_ROWS)
+        _verify_onnx_parity(
+            final_model=final_model,
+            onnx_model_path=model_path,
+            sample_df=parity_sample,
+            best_iteration=final_num_boost_round,
+        )
 
+    # Final JSON result: TrainingResult provides to_json()
+    final_json = training_result.to_json() if hasattr(training_result, "to_json") else json.dumps(training_result.__dict__, default=str)
 
-__all__ = ["train_model_task"]
+    logger.info("training task complete")
+    return final_json
