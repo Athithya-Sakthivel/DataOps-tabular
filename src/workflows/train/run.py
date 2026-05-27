@@ -62,7 +62,7 @@ if TRAIN_PROFILE not in {"staging", "prod"}:
     raise RuntimeError(f"TRAIN_PROFILE must be 'staging' or 'prod', got {TRAIN_PROFILE!r}")
 
 TRAIN_SERVICE_ACCOUNT = _env_str("TRAIN_SERVICE_ACCOUNT", "ray") or "ray"
-TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE","ghcr.io/athithya-sakthivel/flyte-train-task:2026-05-27-09-38--0b5f0ae@sha256:00a47e07e4605544f6232f21da0f3dde9a28e493c6048d762d0edb94fefacf91")
+TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE","ghcr.io/athithya-sakthivel/flyte-train-task:2026-05-27-10-43--e14c2df@sha256:3f4e3dce5c31ee249a9923ee7ea21d1ca7bc612581c45713878d96642de86e71")
 if not TRAIN_TASK_IMAGE:
     raise RuntimeError("TRAIN_TASK_IMAGE environment variable must be set and non-empty")
 
@@ -80,7 +80,7 @@ PORT_FORWARD_LOG = Path(_env_str("PORT_FORWARD_LOG", "/tmp/flyteadmin-portforwar
 PORT_FORWARD_PROC: subprocess.Popen[str] | None = None
 
 ACTIVATE_LAUNCHPLANS = _env_bool("ACTIVATE_LAUNCHPLANS", "0")
-USE_LATEST = _env_bool("USE_LATEST", "0")
+USE_LATEST = _env_bool("USE_LATEST", "1")
 PYFLYTE_REGISTER_EXTRA_ARGS = _env_str("PYFLYTE_REGISTER_EXTRA_ARGS", "")
 
 TASK_NAMESPACE_BOOTSTRAP_NAME = _env_str("TRAIN_TASK_NAMESPACE_BOOTSTRAP_NAME", "project-quota")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -112,6 +112,23 @@ def _normalize_s3_prefix(prefix: str) -> str:
     return prefix.strip().strip("/")
 
 
+def _normalize_cutoff_date(value: object) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"train_eval_cutoff must be an ISO date string YYYY-MM-DD, got {value!r}"
+            ) from exc
+    raise TypeError(
+        f"train_eval_cutoff must be a date, datetime, or ISO date string, got {type(value).__name__}"
+    )
+
+
 def _s3_uri(bucket: str, *parts: str) -> str:
     clean_parts = [part.strip("/") for part in parts if part and part.strip("/")]
     if not clean_parts:
@@ -120,8 +137,7 @@ def _s3_uri(bucket: str, *parts: str) -> str:
 
 
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
-    value = uri.strip()
-    parsed = urlparse(value)
+    parsed = urlparse(uri.strip())
     if parsed.scheme != "s3":
         raise ValueError(f"Expected s3:// URI, got {uri!r}")
     if not parsed.netloc:
@@ -139,37 +155,39 @@ def build_artifact_plan(
     model_artifacts_s3_prefix: str,
     feature_version: str,
     lineage: object,
-    train_eval_cutoff: date,
+    train_eval_cutoff: object,
     model_name: str = MODEL_NAME,
     model_version: str = MODEL_VERSION,
 ) -> ArtifactPlan:
     bucket = _normalize_s3_bucket(model_artifacts_s3_bucket)
     prefix = _normalize_s3_prefix(model_artifacts_s3_prefix)
+    cutoff_date = _normalize_cutoff_date(train_eval_cutoff)
     lineage_part = str(lineage).strip()
     if not lineage_part:
         raise ValueError("lineage must not be empty")
 
-    artifact_root = _s3_uri(
+    root = _s3_uri(
         bucket,
         prefix,
         f"{model_name}_{model_version}",
+        feature_version,
         lineage_part,
-        train_eval_cutoff.isoformat(),
+        cutoff_date.isoformat(),
     )
 
     return ArtifactPlan(
-        artifact_root_s3_uri=artifact_root,
+        artifact_root_s3_uri=root,
         model_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), RAW_ONNX_FILENAME
+            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), RAW_ONNX_FILENAME
         ),
         schema_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), SCHEMA_FILENAME
+            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), SCHEMA_FILENAME
         ),
         metadata_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), METADATA_FILENAME
+            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), METADATA_FILENAME
         ),
         manifest_s3_uri=_s3_uri(
-            bucket, prefix, f"{model_name}_{model_version}", lineage_part, train_eval_cutoff.isoformat(), MANIFEST_FILENAME
+            bucket, prefix, f"{model_name}_{model_version}", feature_version, lineage_part, cutoff_date.isoformat(), MANIFEST_FILENAME
         ),
     )
 
@@ -219,7 +237,6 @@ def _validate_training_dataframe(df: pd.DataFrame, elt_contract: ELTContract) ->
             f"Expected: {expected_columns}\n"
             f"Actual:   {list(df.columns)}"
         )
-
     if df["schema_version"].nunique(dropna=False) != 1:
         raise ValueError("schema_version is not single-valued.")
     if df["feature_version"].nunique(dropna=False) != 1:

@@ -5,7 +5,6 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 source .venv_train/bin/activate
 
 export MODEL_ARTIFACTS_S3_BUCKET=$S3_BUCKET
-python3 -m workflows.train.run up
 python3 -m workflows.train.run register
 python3 -m workflows.train.run train
 
