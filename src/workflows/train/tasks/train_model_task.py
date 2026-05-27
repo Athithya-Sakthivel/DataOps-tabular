@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import date, datetime
-from inspect import signature
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -23,15 +21,10 @@ from workflows.train.shared_utils import (
     LABEL_COLUMN,
     MATRIX_FEATURE_COLUMNS,
     MODEL_FAMILY,
-    PREDICTION_COLUMN,
-    PREPROCESSING_VERSION,
-    TARGET_TRANSFORM,
     CandidateConfig,
     CandidateReport,
     TrainingResult,
     build_artifact_plan,
-    build_bundle_contract,
-    build_bundle_metadata,
     build_category_levels,
     build_training_result,
     clip_seconds,
@@ -66,7 +59,6 @@ ICEBERG_WAREHOUSE = os.environ.get(
 )
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "default")
 
-# Accept either bucket+prefix or a full s3:// URI
 MODEL_ARTIFACTS_S3_BUCKET = os.environ.get("MODEL_ARTIFACTS_S3_BUCKET", "").strip()
 MODEL_ARTIFACTS_S3_PREFIX = os.environ.get("MODEL_ARTIFACTS_S3_PREFIX", "").strip()
 MODEL_ARTIFACTS_S3_URI = os.environ.get("MODEL_ARTIFACTS_S3_URI", "").strip()
@@ -102,23 +94,6 @@ def _categorical_feature_names() -> list[str]:
     ]
 
 
-def _normalize_cutoff_date(value: object) -> date:
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value.strip())
-        except ValueError as exc:
-            raise ValueError(
-                f"train_eval_cutoff must be an ISO date string YYYY-MM-DD, got {value!r}"
-            ) from exc
-    raise TypeError(
-        f"train_eval_cutoff must be a date, datetime, or ISO date string, got {type(value).__name__}"
-    )
-
-
 def _prepare_matrix_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
     missing = [col for col in MATRIX_FEATURE_COLUMNS if col not in raw_df.columns]
     if missing:
@@ -143,6 +118,50 @@ def _prepare_matrix_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
         out[col_name] = values
 
     return out[MATRIX_FEATURE_COLUMNS]
+
+
+def _predict_seconds_from_lgbm(
+    model: lgb.LGBMRegressor,
+    df: pd.DataFrame,
+    best_iteration: int,
+    label_cap_seconds: float,
+) -> np.ndarray:
+    features = _prepare_matrix_frame(df)
+    preds_log = model.predict(features, num_iteration=best_iteration)
+    preds_seconds = from_log_target(preds_log)
+    return clip_seconds(preds_seconds, label_cap_seconds)
+
+
+def _evaluate_model_local(
+    model: lgb.LGBMRegressor,
+    df: pd.DataFrame,
+    best_iteration: int,
+    label_cap_seconds: float,
+) -> dict[str, float]:
+    if df.empty:
+        raise ValueError("Evaluation frame is empty.")
+
+    y_true_raw = pd.to_numeric(df[LABEL_COLUMN], errors="raise").astype("float32").to_numpy()
+    y_true_capped = clip_seconds(y_true_raw, label_cap_seconds)
+    y_pred = _predict_seconds_from_lgbm(
+        model=model,
+        df=df,
+        best_iteration=best_iteration,
+        label_cap_seconds=label_cap_seconds,
+    )
+
+    raw_metrics = compute_metrics(y_true_raw, y_pred)
+    capped_metrics = compute_metrics(y_true_capped, y_pred)
+
+    return {
+        "rows": float(len(df)),
+        "mae_seconds_raw": raw_metrics["mae"],
+        "rmse_seconds_raw": raw_metrics["rmse"],
+        "medae_seconds_raw": raw_metrics["medae"],
+        "mae_seconds_capped": capped_metrics["mae"],
+        "rmse_seconds_capped": capped_metrics["rmse"],
+        "medae_seconds_capped": capped_metrics["medae"],
+    }
 
 
 def _fit_lgbm_candidate(
@@ -215,50 +234,6 @@ def _fit_lgbm_candidate(
         "medae_seconds_capped": capped_metrics["medae"],
     }
     return model, best_iteration, metrics
-
-
-def _predict_seconds_from_lgbm(
-    model: lgb.LGBMRegressor,
-    df: pd.DataFrame,
-    best_iteration: int,
-    label_cap_seconds: float,
-) -> np.ndarray:
-    features = _prepare_matrix_frame(df)
-    preds_log = model.predict(features, num_iteration=best_iteration)
-    preds_seconds = from_log_target(preds_log)
-    return clip_seconds(preds_seconds, label_cap_seconds)
-
-
-def _evaluate_model_local(
-    model: lgb.LGBMRegressor,
-    df: pd.DataFrame,
-    best_iteration: int,
-    label_cap_seconds: float,
-) -> dict[str, float]:
-    if df.empty:
-        raise ValueError("Evaluation frame is empty.")
-
-    y_true_raw = pd.to_numeric(df[LABEL_COLUMN], errors="raise").astype("float32").to_numpy()
-    y_true_capped = clip_seconds(y_true_raw, label_cap_seconds)
-    y_pred = _predict_seconds_from_lgbm(
-        model=model,
-        df=df,
-        best_iteration=best_iteration,
-        label_cap_seconds=label_cap_seconds,
-    )
-
-    raw_metrics = compute_metrics(y_true_raw, y_pred)
-    capped_metrics = compute_metrics(y_true_capped, y_pred)
-
-    return {
-        "rows": float(len(df)),
-        "mae_seconds_raw": raw_metrics["mae"],
-        "rmse_seconds_raw": raw_metrics["rmse"],
-        "medae_seconds_raw": raw_metrics["medae"],
-        "mae_seconds_capped": capped_metrics["mae"],
-        "rmse_seconds_capped": capped_metrics["rmse"],
-        "medae_seconds_capped": capped_metrics["medae"],
-    }
 
 
 def _search_best_model_logged(
@@ -356,50 +331,6 @@ def _onnx_output_names(onnx_model: object) -> list[str]:
     return output_names
 
 
-def _materialize_training_bundle(
-    *,
-    bundle_root: Path,
-    training_result: TrainingResult,
-    onnx_model: object,
-) -> tuple[Path, Path, Path, Path]:
-    bundle_root.mkdir(parents=True, exist_ok=True)
-
-    model_path = bundle_root / RAW_ONNX_FILENAME
-    schema_path = bundle_root / SCHEMA_FILENAME
-    metadata_path = bundle_root / METADATA_FILENAME
-    manifest_path = bundle_root / MANIFEST_FILENAME
-
-    logger.info("materializing training bundle in %s", bundle_root)
-
-    onnx.save_model(onnx_model, str(model_path))
-
-    write_json(schema_path, training_result.bundle_contract)
-    write_json(metadata_path, training_result.bundle_metadata)
-
-    model_sha256 = sha256_file(model_path)
-    schema_sha256 = sha256_file(schema_path)
-    metadata_sha256 = sha256_file(metadata_path)
-
-    manifest_payload = {
-        "format_version": 1,
-        "source_uri": training_result.artifact_plan.artifact_root_s3_uri,
-        "model_version": training_result.model_version,
-        "model_sha256": model_sha256,
-        "schema_sha256": schema_sha256,
-        "metadata_sha256": metadata_sha256,
-    }
-    write_json(manifest_path, manifest_payload)
-
-    if sha256_file(model_path) != model_sha256:
-        raise RuntimeError("model.onnx checksum validation failed after write")
-    if sha256_file(schema_path) != schema_sha256:
-        raise RuntimeError("schema.json checksum validation failed after write")
-    if sha256_file(metadata_path) != metadata_sha256:
-        raise RuntimeError("metadata.json checksum validation failed after write")
-
-    return model_path, schema_path, metadata_path, manifest_path
-
-
 def _verify_onnx_parity(
     *,
     final_model: lgb.LGBMRegressor,
@@ -447,25 +378,48 @@ def _verify_onnx_parity(
     )
 
 
-def _parse_bucket_and_prefix_from_env() -> tuple[str, str]:
-    def split_s3_uri(uri: str) -> tuple[str, str]:
-        parsed = urlparse(uri)
-        if parsed.scheme != "s3":
-            raise ValueError(f"Expected s3:// URI, got: {uri!r}")
-        bucket = parsed.netloc
-        key = parsed.path.lstrip("/")
-        return bucket, key
+def _materialize_training_bundle(
+    *,
+    bundle_root: Path,
+    training_result: TrainingResult,
+    onnx_model: object,
+) -> tuple[Path, Path, Path, Path]:
+    bundle_root.mkdir(parents=True, exist_ok=True)
 
-    if MODEL_ARTIFACTS_S3_URI:
-        bucket, key = split_s3_uri(MODEL_ARTIFACTS_S3_URI)
-        return bucket, key.strip("/")
+    model_path = bundle_root / RAW_ONNX_FILENAME
+    schema_path = bundle_root / SCHEMA_FILENAME
+    metadata_path = bundle_root / METADATA_FILENAME
+    manifest_path = bundle_root / MANIFEST_FILENAME
 
-    if MODEL_ARTIFACTS_S3_BUCKET.startswith("s3://"):
-        bucket, key = split_s3_uri(MODEL_ARTIFACTS_S3_BUCKET)
-        prefix = MODEL_ARTIFACTS_S3_PREFIX or key.strip("/")
-        return bucket, prefix
+    logger.info("materializing training bundle in %s", bundle_root)
 
-    return MODEL_ARTIFACTS_S3_BUCKET, MODEL_ARTIFACTS_S3_PREFIX.strip("/")
+    onnx.save_model(onnx_model, str(model_path))
+
+    write_json(schema_path, training_result.bundle_contract)
+    write_json(metadata_path, training_result.bundle_metadata)
+
+    model_sha256 = sha256_file(model_path)
+    schema_sha256 = sha256_file(schema_path)
+    metadata_sha256 = sha256_file(metadata_path)
+
+    manifest_payload = {
+        "format_version": 1,
+        "source_uri": training_result.artifact_plan.artifact_root_s3_uri,
+        "model_version": training_result.model_version,
+        "model_sha256": model_sha256,
+        "schema_sha256": schema_sha256,
+        "metadata_sha256": metadata_sha256,
+    }
+    write_json(manifest_path, manifest_payload)
+
+    if sha256_file(model_path) != model_sha256:
+        raise RuntimeError("model.onnx checksum validation failed after write")
+    if sha256_file(schema_path) != schema_sha256:
+        raise RuntimeError("schema.json checksum validation failed after write")
+    if sha256_file(metadata_path) != metadata_sha256:
+        raise RuntimeError("metadata.json checksum validation failed after write")
+
+    return model_path, schema_path, metadata_path, manifest_path
 
 
 @task(
@@ -654,34 +608,19 @@ def train_model_task(
 
     with log_step("build_artifact_plan"):
         lineage = table_snapshot_lineage(table)
-        bucket, prefix = _parse_bucket_and_prefix_from_env()
 
-        # Candidate kwargs for different shared_utils versions
-        candidate_kwargs = {
-            "model_artifacts_s3_bucket": bucket,
-            "model_artifacts_s3_prefix": prefix,
-            "model_artifacts_s3_uri": f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}",
-            "bucket": bucket,
-            "prefix": prefix,
-            "feature_version": EXPECTED_FEATURE_VERSION,
-            "lineage": lineage,
-            "train_eval_cutoff": splits.train_eval_cutoff,
-            "train_eval_cutoff_date": splits.train_eval_cutoff,
-            "model_name": MODEL_NAME,
-            "model_version": MODEL_VERSION,
-        }
+        # Determine bucket from either MODEL_ARTIFACTS_S3_URI or bucket env.
+        bucket = MODEL_ARTIFACTS_S3_BUCKET
+        if MODEL_ARTIFACTS_S3_URI:
+            parsed = urlparse(MODEL_ARTIFACTS_S3_URI)
+            bucket = parsed.netloc
 
-        sig = signature(build_artifact_plan)
-        accepted = set(sig.parameters.keys())
-        call_kwargs = {k: v for k, v in candidate_kwargs.items() if k in accepted}
-
-        if not call_kwargs:
-            raise RuntimeError(
-                "build_artifact_plan signature does not accept any of the expected parameters; "
-                "inspect shared_utils.build_artifact_plan to adapt the caller."
-            )
-
-        artifact_plan = build_artifact_plan(**call_kwargs)
+        artifact_plan = build_artifact_plan(
+            model_artifacts_s3_bucket=bucket,
+            feature_version=EXPECTED_FEATURE_VERSION,
+            lineage=lineage,
+            train_eval_cutoff=splits.train_eval_cutoff,
+        )
         logger.info("artifact_root=%s", getattr(artifact_plan, "artifact_root_s3_uri", repr(artifact_plan)))
 
     category_levels = build_category_levels(train_eval_df)
@@ -690,29 +629,17 @@ def train_model_task(
         bundle_root = Path(tmp)
 
         with log_step("export_onnx_model"):
-            onnx_model = export_onnx_model(final_model, feature_order=list(MATRIX_FEATURE_COLUMNS))
+            # call export_onnx_model using the signature in shared_utils: (final_model, feature_count)
+            onnx_model = export_onnx_model(final_model=final_model, feature_count=len(MATRIX_FEATURE_COLUMNS))
 
-        with log_step("build_bundle_contract_and_metadata"):
-            bundle_contract_json = build_bundle_contract(
-                output_names=[PREDICTION_COLUMN],
-                input_name="input",
-                feature_order=MATRIX_FEATURE_COLUMNS,
-                request_feature_order=MATRIX_FEATURE_COLUMNS,
-                engineered_feature_order=MATRIX_FEATURE_COLUMNS,
-                schema_version=EXPECTED_SCHEMA_VERSION,
-                feature_version=EXPECTED_FEATURE_VERSION,
-                preprocessing_version=PREPROCESSING_VERSION,
-                target_transform=TARGET_TRANSFORM,
-                allow_extra_features=False,
-            )
+        # derive output names from the exported ONNX model
+        output_names = _onnx_output_names(onnx_model)
 
-            bundle_metadata_json = build_bundle_metadata(
+        with log_step("build_training_result"):
+            # call build_training_result with the exact keyword-only parameters expected by shared_utils
+            training_result = build_training_result(
                 elt_contract=elt_contract,
                 lineage=lineage,
-                artifact_plan=artifact_plan,
-                model_name=MODEL_NAME,
-                model_version=MODEL_VERSION,
-                bundle_contract_json=bundle_contract_json,
                 category_levels=category_levels,
                 selected_candidate=best_candidate,
                 candidate_reports=candidate_reports,
@@ -726,52 +653,11 @@ def train_model_task(
                 final_num_boost_round=final_num_boost_round,
                 train_rows=len(train_eval_df),
                 test_rows=len(test_df),
+                artifact_plan=artifact_plan,
+                model_name=MODEL_NAME,
+                model_version=MODEL_VERSION,
+                output_names=output_names,
             )
-
-        with log_step("build_training_result"):
-            # Build kwargs for build_training_result and filter by signature to avoid unexpected-arg errors
-            desired_kwargs = {
-                "table_identifier": "gold.trip_training_matrix",
-                "schema_version": EXPECTED_SCHEMA_VERSION,
-                "feature_version": EXPECTED_FEATURE_VERSION,
-                "preprocessing_version": PREPROCESSING_VERSION,
-                "elt_contract": elt_contract,
-                "lineage": lineage,
-                "category_levels": category_levels,
-                "selected_candidate": best_candidate,
-                "candidate_reports": candidate_reports,
-                "search_best_metrics": search_best_metrics,
-                "inner_metrics": inner_metrics,
-                "holdout_metrics": holdout_metrics,
-                "holdout_baseline_metrics": holdout_baseline_metrics,
-                "label_cap_seconds": label_cap_seconds,
-                "train_label_p50_seconds": train_label_p50_seconds,
-                "best_iteration_inner": best_iteration_inner,
-                "final_num_boost_round": final_num_boost_round,
-                "train_rows": len(train_eval_df),
-                "test_rows": len(test_df),
-                "request_feature_columns": list(MATRIX_FEATURE_COLUMNS),
-                "engineered_feature_columns": list(MATRIX_FEATURE_COLUMNS),
-                "model_input_columns": list(MATRIX_FEATURE_COLUMNS),
-                "model_feature_columns": list(MATRIX_FEATURE_COLUMNS),
-                "model_name": MODEL_NAME,
-                "model_version": MODEL_VERSION,
-                "bundle_contract": bundle_contract_json,
-                "bundle_metadata": bundle_metadata_json,
-                "artifact_plan": artifact_plan,
-            }
-
-            tr_sig = signature(build_training_result)
-            tr_accepted = set(tr_sig.parameters.keys())
-            tr_call_kwargs = {k: v for k, v in desired_kwargs.items() if k in tr_accepted}
-
-            if not tr_call_kwargs:
-                raise RuntimeError(
-                    "build_training_result signature does not accept any of the expected parameters; "
-                    "inspect shared_utils.build_training_result to adapt the caller."
-                )
-
-            training_result = build_training_result(**tr_call_kwargs)
 
         with log_step("materialize_training_bundle"):
             model_path, schema_path, metadata_path, manifest_path = _materialize_training_bundle(
@@ -799,5 +685,4 @@ def train_model_task(
     try:
         return training_result.to_json()
     except Exception:
-        # fallback to dict serialization
         return json.dumps(training_result.as_dict(), default=str)
