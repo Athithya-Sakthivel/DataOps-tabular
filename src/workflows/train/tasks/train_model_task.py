@@ -470,8 +470,8 @@ def _parse_bucket_and_prefix_from_env() -> tuple[str, str]:
 @task(
     cache=False,
     retries=1,
-    requests=Resources(cpu="2", mem="3Gi"),
-    limits=Resources(cpu="3", mem="3Gi"),
+    requests=Resources(cpu="1", mem="1Gi"),
+    limits=Resources(cpu="1.5", mem="2Gi"),
 )
 def train_model_task(
     train_num_threads: int,

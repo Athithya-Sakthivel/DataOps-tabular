@@ -62,7 +62,7 @@ if TRAIN_PROFILE not in {"staging", "prod"}:
     raise RuntimeError(f"TRAIN_PROFILE must be 'staging' or 'prod', got {TRAIN_PROFILE!r}")
 
 TRAIN_SERVICE_ACCOUNT = _env_str("TRAIN_SERVICE_ACCOUNT", "ray") or "ray"
-TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE","ghcr.io/athithya-sakthivel/flyte-train-task:2026-05-27-11-48--6de7f92@sha256:f84f2fff1ea36c97a98a8daba6b3c5005d2f2729776b158105a45cc2990901b3")
+TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE","ghcr.io/athithya-sakthivel/flyte-train-task:2026-05-27-12-15--539d541@sha256:1487d3f56c126d35751aebc1aa12c906c70a1864d68dea58848e818edffd1afe")
 if not TRAIN_TASK_IMAGE:
     raise RuntimeError("TRAIN_TASK_IMAGE environment variable must be set and non-empty")
 
