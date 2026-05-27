@@ -137,12 +137,21 @@ python3 -m venv .venv_train
 
 
 log "installing Python packages"
-python3 -m pip install --no-cache-dir --break-system-packages \
-  pyarrow==23.0.1 \
+
+pip install --no-cache-dir \
+  pyiceberg==0.11.0 \
   boto3==1.42.81 \
-  pre-commit==4.5.1 \
-  datasets==4.8.4 \
-  pyyaml==6.0.3
+  onnxruntime==1.24.4 \
+  pandas==2.3.3 \
+  numpy==2.4.4 \
+  rich==14.3.3 \
+  s3fs==2026.3.0 \
+  fsspec==2026.3.0 \
+  pyarrow==23.0.1 \
+  requests==2.33.1 \
+  urllib3==2.7.0 \
+  pyyaml==6.0.3 \
+  --break-system-packages
 
 log "installing pre-commit hooks"
 pre-commit install --install-hooks

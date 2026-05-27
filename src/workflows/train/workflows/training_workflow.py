@@ -18,26 +18,22 @@ def train(
     model_artifacts_s3_prefix: str = "",
     model_artifacts_s3_uri: str = "",
 ) -> str:
-    # Pass env vars through to tasks
-    env_vars = {}
-    if model_artifacts_s3_bucket:
-        env_vars["MODEL_ARTIFACTS_S3_BUCKET"] = model_artifacts_s3_bucket
-    if model_artifacts_s3_prefix:
-        env_vars["MODEL_ARTIFACTS_S3_PREFIX"] = model_artifacts_s3_prefix
-    if model_artifacts_s3_uri:
-        env_vars["MODEL_ARTIFACTS_S3_URI"] = model_artifacts_s3_uri
+    # Build environment dict using Flyte-compatible approach
+    # Use conditional expressions instead of if statements
+    env_vars = {
+        "MODEL_ARTIFACTS_S3_BUCKET": model_artifacts_s3_bucket,
+        "MODEL_ARTIFACTS_S3_PREFIX": model_artifacts_s3_prefix,
+        "MODEL_ARTIFACTS_S3_URI": model_artifacts_s3_uri,
+    }
     
     training_result_json = train_model_task(
         train_num_threads=train_num_threads,
         tuning_sample_rows=tuning_sample_rows,
         max_boost_rounds=max_boost_rounds,
-        model_artifacts_s3_bucket=model_artifacts_s3_bucket,
-        model_artifacts_s3_prefix=model_artifacts_s3_prefix,
-        model_artifacts_s3_uri=model_artifacts_s3_uri,
-    ).with_overrides(environment=env_vars if env_vars else None)  # Only set if non-empty
+    ).with_overrides(environment=env_vars)
 
     return evaluate_and_register_task(
         training_result_json=training_result_json,
         mlflow_experiment_name=mlflow_experiment_name,
         max_eval_rows=max_eval_rows,
-    ).with_overrides(environment=env_vars if env_vars else None)
+    )

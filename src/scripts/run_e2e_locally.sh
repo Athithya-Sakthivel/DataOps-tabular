@@ -26,3 +26,7 @@ make prune-elt                             # cleanup Spark operator / ELT-relate
 make train                                 # run Flyte training workflow (consumes Gold Iceberg tables)
 
 aws s3 ls s3://$S3_BUCKET/model-artifacts/ --recursive
+
+kubectl port-forward -n default svc/iceberg-rest 8181:8181 &
+sleep 3
+python3 src/scripts/verify_all.py

@@ -21,7 +21,7 @@ pg-restore-time:
 
 elt:
 	bash src/infra/elt/iceberg.sh --rollout && bash src/infra/elt/spark_operator.sh --rollout && \
-	python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/ELT/run.sh && echo "sleep for 1500 seconds..." && sleep 1500 && kubectl get pods -A
+	python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/ELT/run.sh && echo "sleep for 900 seconds..." && sleep 900 && kubectl get pods -A
 
 prune-elt:
 	bash src/infra/elt/spark_operator.sh --cleanup
@@ -30,7 +30,7 @@ train:
 	bash src/infra/elt/iceberg.sh --rollout && \
 	python3 src/infra/core/flyte_setup.py --rollout && \
 	python3 src/infra/train/mlflow_server.py --rollout && \
-	bash src/workflows/train/commands.sh && echo "sleep for 600 seconds..."
+	bash src/workflows/train/commands.sh && echo "wait for 600 seconds..." && sleep 600
 
 prune-train:
 	python3 src/infra/train/mlflow_server.py --delete && python3 src/infra/core/flyte_setup.py --delete

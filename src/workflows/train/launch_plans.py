@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 from flytekit import LaunchPlan
 
 from workflows.train.workflows.training_workflow import train
@@ -14,11 +12,6 @@ DEFAULT_MAX_EVAL_ROWS = 100_000
 
 TRAIN_WORKFLOW_LP_NAME = "train_default"
 
-# Read MODEL_* env vars at registration time so your shell values become LaunchPlan defaults
-DEFAULT_MODEL_ARTIFACTS_S3_BUCKET = os.environ.get("MODEL_ARTIFACTS_S3_BUCKET", "")
-DEFAULT_MODEL_ARTIFACTS_S3_PREFIX = os.environ.get("MODEL_ARTIFACTS_S3_PREFIX", "")
-DEFAULT_MODEL_ARTIFACTS_S3_URI = os.environ.get("MODEL_ARTIFACTS_S3_URI", "")
-
 TRAIN_WORKFLOW_LP = LaunchPlan.get_or_create(
     workflow=train,
     name=TRAIN_WORKFLOW_LP_NAME,
@@ -28,9 +21,6 @@ TRAIN_WORKFLOW_LP = LaunchPlan.get_or_create(
         "max_boost_rounds": DEFAULT_MAX_BOOST_ROUNDS,
         "mlflow_experiment_name": DEFAULT_MLFLOW_EXPERIMENT_NAME,
         "max_eval_rows": DEFAULT_MAX_EVAL_ROWS,
-        "model_artifacts_s3_bucket": DEFAULT_MODEL_ARTIFACTS_S3_BUCKET,
-        "model_artifacts_s3_prefix": DEFAULT_MODEL_ARTIFACTS_S3_PREFIX,
-        "model_artifacts_s3_uri": DEFAULT_MODEL_ARTIFACTS_S3_URI,
     },
 )
 
