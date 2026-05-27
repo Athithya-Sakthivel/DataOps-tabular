@@ -68,7 +68,7 @@ python-dateutil==2.9.0.post0
 python-discovery==1.2.2
 python-dotenv==1.2.2
 PyYAML==6.0.3
-ray==2.54.1
+ray==2.55.0
 referencing==0.37.0
 requests==2.33.1
 rpds-py==0.30.0
@@ -80,7 +80,7 @@ starlette==1.0.0
 sympy==1.14.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
-urllib3==2.6.3
+urllib3==2.7.0
 uvicorn==0.44.0
 uvloop==0.22.1
 virtualenv==21.2.1
