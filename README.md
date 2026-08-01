@@ -23,42 +23,11 @@ DataOps-tabular eliminates all three by enforcing **contracts at every stage**:
 
 ## Architecture
 
-```
-HuggingFace → Bronze (raw + lineage) → Silver (clean + valid) → Gold (frozen features + contract)
-                                                                        │
-                                                                        ▼
-                                                              Training (LightGBM)
-                                                                        │
-                                                                        ▼
-                                                              ONNX bundle (checksum-verified)
-                                                                        │
-                                                                        ▼
-                                                              MLflow (metrics + pyfunc model)
-```
 
-**Bronze** — Raw source data with minimal normalization. Every row carries `run_id`, `source_uri`, `source_revision`, and `ingestion_ts`.
-
-**Silver** — Canonical trip records. Deduplicated via SHA-256 trip IDs. Enriched with temporal features, zone lookups, and validated ranges.
-
-**Gold** — Frozen feature matrix. 14 model features with point-in-time-safe aggregates. A companion contract table records the exact schema hash, encoding maps, and aggregate definitions — creating an immutable serving contract.
-
-**Training** — LightGBM regressor with log1p target transform. Searches 7 hyperparameter candidates, selects best by capped MAE, exports to ONNX with parity checks.
-
-**Evaluation** — Downloads the published bundle, validates all checksums, computes holdout metrics, logs everything to MLflow, and registers a PyFunc wrapper.
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/91429925-b872-4212-9200-39a8aab1d922" />
 
 ---
 
-## Key Results
-
-| Metric | Baseline | Model | Improvement |
-|--------|----------|-------|-------------|
-| MAE (seconds) | 428 | 311 | **27.4%** |
-| Median Error | — | 113s (1.9 min) | — |
-| Training samples | — | 7,689 | — |
-| Features | — | 14 | — |
-| ONNX bundle size | — | 2 MB | — |
-
----
 
 ## Prerequisites
 
