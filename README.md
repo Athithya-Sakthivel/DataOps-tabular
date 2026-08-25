@@ -1,23 +1,23 @@
-# DataOps-tabular: A contract-driven medallion lakehouse platform
+# DataOps-Tabular: A Contract-Driven Medallion Lakehouse Platform
 
-**Contract-driven batch ELT, governed feature engineering, reproducible ML training, and versioned ONNX model packaging — orchestrated by Flyte, computed by Spark, stored on Iceberg/S3, and served via MLflow.**
+**Contract-driven batch ELT, governed feature engineering, reproducible ML training, and versioned ONNX model packaging — orchestrated by Flyte, computed by Spark, stored on Iceberg/S3, and tracked by MLflow.**
 
 ---
 
 ## What This Solves
 
-Most ML projects fail in production because of three missing guarantees:
+Production ML systems commonly fail due to missing governance and reproducibility guarantees. DataOps-Tabular specifically addresses three critical gaps:
 
-1. **No data lineage** — cannot trace which raw data produced which model
-2. **Feature drift** — training features differ from serving features
-3. **Unreproducible models** — cannot rebuild the exact same model from source
+1. **Data lineage** — Inability to trace which raw data produced which model.
+2. **Feature drift** — Divergence between features used in training and those used in serving.
+3. **Reproducibility** — Inability to reconstruct the exact model from source data and code.
 
-DataOps-tabular eliminates all three by enforcing **contracts at every stage**:
+DataOps-Tabular eliminates these gaps by enforcing **contracts at every stage of the pipeline**:
 
-- **Schema contracts** — Gold tables define the exact feature order and types; training reads, never re-derives
-- **Lineage contracts** — Every row traces back to its source file, revision, and ingestion run
-- **Bundle contracts** — Models ship with checksum-verified metadata, schema, and manifest files
-- **Resource contracts** — Flyte tasks declare explicit CPU/memory budgets, enforced by Kubernetes
+- **Schema contracts** — Gold-layer tables define the canonical feature order and types; training consumes this contract directly without re-derivation.
+- **Lineage contracts** — Every record traces back to its originating source file, revision, and ingestion run.
+- **Bundle contracts** — Models are packaged with checksum-verified metadata, schema, and manifest files.
+- **Resource contracts** — Flyte tasks declare explicit CPU and memory budgets, enforced by Kubernetes.
 
 ---
 
